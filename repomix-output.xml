@@ -1,0 +1,2839 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+new/
+  entities/
+    Attachment.ts
+    Chat.ts
+    Handle.ts
+    Message.ts
+  helpers/
+    dateUtils.ts
+    utils.ts
+  serializers/
+    AttachmentSerializer.ts
+    ChatSerializer.ts
+    constants.ts
+    HandleSerializer.ts
+    MessageSerializer.ts
+    types.ts
+  env.ts
+  transformers.ts
+  types.ts
+env.ts
+events.ts
+index.ts
+package.json
+tsconfig.json
+types.ts
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="new/entities/Attachment.ts">
+import { Entity, PrimaryGeneratedColumn, Column, ManyToMany, JoinTable } from "typeorm";
+import { Message } from "./Message";
+import { isEmpty } from "../helpers/utils";
+import { isMinSierra, isMinHighSierra } from "../env";
+import { conditional } from "conditional-decorator";
+import * as mime from "mime-types";
+import { BooleanTransformer, MessagesDateTransformer, AttributedBodyTransformer } from "../transformers";
+
+import * as path from "path";
+function getRealPath(filePath: string) {
+    let output = filePath;
+    if (isEmpty(output)) return output;
+
+    if (output[0] === "~") {
+        output = path.join(process.env.HOME, output.slice(1));
+    }
+
+    return output;
+}
+
+@Entity("attachment")
+export class Attachment {
+    @PrimaryGeneratedColumn({ name: "ROWID" })
+    ROWID: number;
+
+    @ManyToMany(type => Message)
+    @JoinTable({
+        name: "message_attachment_join",
+        joinColumns: [{ name: "attachment_id" }],
+        inverseJoinColumns: [{ name: "message_id" }]
+    })
+    messages: Message[];
+
+    @Column({ type: "text", nullable: false })
+    guid: string;
+
+    @Column({
+        type: "integer",
+        name: "created_date",
+        default: 0,
+        transformer: MessagesDateTransformer
+    })
+    createdDate: Date;
+
+    @Column({
+        type: "integer",
+        name: "start_date",
+        default: 0,
+        transformer: MessagesDateTransformer
+    })
+    startDate: Date;
+
+    @Column({ type: "text", name: "filename", nullable: false })
+    filePath: string;
+
+    @Column({ type: "text", nullable: false })
+    uti: string;
+
+    @Column({ type: "text", name: "mime_type", nullable: true })
+    mimeType: string;
+
+    @Column({ type: "integer", name: "transfer_state", default: 0 })
+    transferState: number;
+
+    @Column({
+        type: "integer",
+        name: "is_outgoing",
+        default: 0,
+        transformer: BooleanTransformer
+    })
+    isOutgoing: boolean;
+
+    @Column({
+        type: "blob",
+        name: "user_info",
+        nullable: true,
+        transformer: AttributedBodyTransformer
+    })
+    userInfo: NodeJS.Dict<any>[] | null;
+
+    @Column({ type: "text", name: "transfer_name", nullable: false })
+    transferName: string;
+
+    @Column({ type: "integer", name: "total_bytes", default: 0 })
+    totalBytes: number;
+
+    @conditional(
+        isMinSierra,
+        Column({
+            type: "integer",
+            name: "is_sticker",
+            default: 0,
+            transformer: BooleanTransformer
+        })
+    )
+    isSticker: boolean;
+
+    @conditional(
+        isMinSierra,
+        Column({
+            type: "blob",
+            name: "sticker_user_info",
+            nullable: true
+        })
+    )
+    stickerUserInfo: Blob;
+
+    @conditional(
+        isMinSierra,
+        Column({
+            type: "blob",
+            name: "attribution_info",
+            nullable: true,
+            transformer: AttributedBodyTransformer
+        })
+    )
+    attributionInfo: NodeJS.Dict<any>[] | null;
+
+    @conditional(
+        isMinSierra,
+        Column({
+            type: "integer",
+            name: "hide_attachment",
+            default: 0,
+            transformer: BooleanTransformer
+        })
+    )
+    hideAttachment: boolean;
+
+    @conditional(
+        isMinHighSierra,
+        Column({
+            type: "text",
+            unique: true,
+            name: "original_guid"
+        })
+    )
+    originalGuid: string;
+
+    private getMimeTypeFromUserInfo(): string | null {
+        if (isEmpty(this.userInfo)) return null;
+        return this.userInfo[0]['mime-type'] ?? null;
+    }
+
+    getDimensions(): { height: number, width: number } | null {
+        if (isEmpty(this.attributionInfo)) return null;
+        const height = this.attributionInfo[0]?.pgensh;
+        const width = this.attributionInfo[0]?.pgensw;
+        if (!height || !width) return null;
+        return { height, width };
+    }
+
+    getMimeType(): string {
+        const fPath = getRealPath(this.filePath);
+        let mType = this.mimeType ?? this.getMimeTypeFromUserInfo() ?? mime.lookup(fPath);
+        if (!mType || isEmpty(mType as any)) mType = "application/octet-stream";
+        return mType;
+    }
+}
+</file>
+
+<file path="new/entities/Chat.ts">
+import { Entity, PrimaryGeneratedColumn, Column, ManyToMany, JoinTable } from "typeorm";
+import { Handle } from "./Handle";
+import { Message } from "./Message";
+import { AttributedBodyTransformer, MessagesDateTransformer, BooleanTransformer } from "../transformers";
+import { isMinHighSierra } from "../env";
+import { conditional } from "conditional-decorator";
+
+@Entity("chat")
+export class Chat {
+    @PrimaryGeneratedColumn({ name: "ROWID" })
+    ROWID: number;
+
+    @ManyToMany(type => Handle)
+    @JoinTable({
+        name: "chat_handle_join",
+        joinColumns: [{ name: "chat_id" }],
+        inverseJoinColumns: [{ name: "handle_id" }]
+    })
+    participants: Handle[];
+
+    @ManyToMany(type => Message)
+    @JoinTable({
+        name: "chat_message_join",
+        joinColumns: [{ name: "chat_id" }],
+        inverseJoinColumns: [{ name: "message_id" }]
+    })
+    messages: Message[];
+
+    @Column({ type: "text", nullable: false })
+    guid: string;
+
+    @Column({ type: "integer", nullable: true })
+    style: number;
+
+    @Column({ type: "integer", nullable: true })
+    state: number;
+
+    @Column({ name: "account_id", type: "text", nullable: true })
+    accountId: number;
+
+    @Column({
+        type: "blob",
+        nullable: true,
+        transformer: AttributedBodyTransformer
+    })
+    properties: NodeJS.Dict<any>[] | null;
+
+    @Column({ name: "chat_identifier", type: "text", nullable: true })
+    chatIdentifier: string;
+
+    @Column({ name: "service_name", type: "text", nullable: true })
+    serviceName: string;
+
+    @Column({ name: "room_name", type: "text", nullable: true })
+    roomName: string;
+
+    @Column({ name: "account_login", type: "text", nullable: true })
+    accountLogin: string;
+
+    @Column({
+        name: "is_archived",
+        type: "integer",
+        nullable: true,
+        transformer: BooleanTransformer
+    })
+    isArchived: boolean;
+
+    @conditional(
+        isMinHighSierra,
+        Column({
+            name: "last_read_message_timestamp",
+            type: "date",
+            transformer: MessagesDateTransformer,
+            default: 0
+        })
+    )
+    lastReadMessageTimestamp: Date;
+
+    @Column({ name: "last_addressed_handle", type: "text", nullable: true })
+    lastAddressedHandle: string;
+
+    @Column({ name: "display_name", type: "text", nullable: true })
+    displayName: string;
+
+    @Column({ name: "group_id", type: "text", nullable: true })
+    groupId: string;
+
+    @Column({
+        name: "is_filtered",
+        type: "integer",
+        nullable: true,
+        transformer: BooleanTransformer
+    })
+    isFiltered: boolean;
+
+    @Column({
+        name: "successful_query",
+        type: "integer",
+        nullable: true,
+        transformer: BooleanTransformer
+    })
+    successfulQuery: boolean;
+
+    get isGroup() {
+        return this.style === 43;
+    }
+}
+</file>
+
+<file path="new/entities/Handle.ts">
+import { Entity, PrimaryGeneratedColumn, Column, OneToMany, JoinColumn, JoinTable, ManyToMany } from "typeorm";
+import { Message } from "./Message";
+import { Chat } from "./Chat";
+
+@Entity("handle")
+export class Handle {
+    @PrimaryGeneratedColumn({ name: "ROWID" })
+    ROWID: number;
+
+    @OneToMany(type => Message, message => message.handle)
+    @JoinColumn({ name: "ROWID", referencedColumnName: "handle_id" })
+    messages: Message[];
+
+    @ManyToMany(type => Chat)
+    @JoinTable({
+        name: "chat_handle_join",
+        joinColumns: [{ name: "handle_id" }],
+        inverseJoinColumns: [{ name: "chat_id" }]
+    })
+    chats: Chat[];
+
+    @Column({ type: "text", nullable: false })
+    id: string;
+
+    @Column({ type: "text", nullable: true })
+    country: string;
+
+    @Column({ type: "text", nullable: false, default: "iMessage" })
+    service: string;
+
+    @Column({ name: "uncanonicalized_id", type: "text", nullable: true })
+    uncanonicalizedId: string;
+}
+</file>
+
+<file path="new/entities/Message.ts">
+import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, JoinTable, JoinColumn, ManyToMany } from "typeorm";
+import { conditional } from "conditional-decorator";
+
+import { BooleanTransformer, MessagesDateTransformer, MessageTypeTransformer, AttributedBodyTransformer } from "../transformers";
+import { Handle } from "./Handle";
+import { Chat } from "./Chat";
+import { Attachment } from "./Attachment";
+import { isEmpty, isNotEmpty, sanitizeStr, AttributedBodyUtils } from "../helpers/utils";
+import { isMinBigSur, isMinCatalina, isMinHighSierra, isMinMonterey, isMinSierra, isMinVentura } from "../env";
+import { NSAttributedString } from "node-typedstream";
+
+@Entity("message")
+export class Message {
+    universalText(sanitize = false): string | null {
+        let text = this.text;
+        const attributedText = AttributedBodyUtils.extractText(this.attributedBody);
+        if (isEmpty(text) && !isEmpty(attributedText)) {
+            text = attributedText;
+        }
+
+        return sanitize ? sanitizeStr(text) : text;
+    }
+
+    contentString(maxText = 15): string {
+        let text = this.universalText(true) ?? "";
+        const textLen = text.length;
+        const attachments = this.attachments ?? [];
+        const attachmentsLen = attachments.length;
+        let subject = this.subject ?? "";
+        const subjectLen = subject.length;
+
+        // Build the content
+        const parts = [];
+
+        // If we have text, add it, but with the max length taken into account
+        if (textLen > 0) {
+            if (textLen > maxText) {
+                text = `${text.substring(0, maxText)}...`;
+            }
+
+            parts.push(`"${text}"`);
+        } else {
+            parts.push(`<No Text>`);
+        }
+
+        // If we have a subject, add it, but with the max length taken into account
+        if (subjectLen > 0) {
+            if (subjectLen > maxText) {
+                subject = `${subject.substring(0, maxText)}...`;
+            }
+
+            parts.push(`Subject: "${subject}"`);
+        }
+
+        // If we have attachments, print those out
+        if (attachmentsLen > 0) parts.push(`Attachments: ${attachmentsLen}`);
+
+        // Lastly, add the date
+        parts.push(`Date: ${this.dateCreated.toLocaleString()}`);
+
+        return parts.join("; ");
+    }
+
+    get retractedParts(): number[] {
+        return this.messageSummaryInfo?.[0]?.retractedParts ?? [];
+    }
+
+    get hasUnsentParts(): boolean {
+        return this.dateEdited && isNotEmpty(this.retractedParts, false);
+    }
+
+    get isFullyUnsent(): boolean {
+        // It's fully unsent if we have unsent parts, and all parts are unsent
+        return this.hasUnsentParts && this.retractedParts.length > 0 && this.partCount === 0;
+    }
+
+    get isPartiallyUnsent(): boolean {
+        // It's partially unsent if we have unsent parts, but there are still parts left
+        return this.hasUnsentParts && this.retractedParts.length > 0 && this.partCount > 0;
+    }
+
+    get lastUpdateTime(): Date {
+        return this.dateRetracted ?? this.dateEdited ?? this.dateRead ?? this.dateDelivered ?? this.dateCreated;
+    }
+
+    get messageStatus(): String {
+        return this.dateRetracted
+            ? "Unsent"
+            : this.isFullyUnsent
+            ? "Unsent"
+            : this.isPartiallyUnsent
+            ? "Partially Unsent"
+            : this.dateEdited
+            ? "Edited"
+            : this.dateRead
+            ? "Read"
+            : this.dateDelivered
+            ? "Delivered"
+            : "Sent";
+    }
+
+    @PrimaryGeneratedColumn({ name: "ROWID" })
+    ROWID: number;
+
+    @Column({ type: "text", nullable: false })
+    guid: string;
+
+    @Column({ type: "text", nullable: true })
+    text: string;
+
+    @Column({ type: "integer", nullable: true, default: 0 })
+    replace: number;
+
+    @Column({
+        name: "service_center",
+        type: "text",
+        nullable: true
+    })
+    serviceCenter: string;
+
+    @ManyToOne(type => Handle)
+    @JoinColumn({ name: "handle_id", referencedColumnName: "ROWID" })
+    handle: Handle;
+
+    @ManyToMany(type => Chat)
+    @JoinTable({
+        name: "chat_message_join",
+        joinColumns: [{ name: "message_id" }],
+        inverseJoinColumns: [{ name: "chat_id" }]
+    })
+    chats: Chat[];
+
+    @ManyToMany(type => Attachment)
+    @JoinTable({
+        name: "message_attachment_join",
+        joinColumns: [{ name: "message_id" }],
+        inverseJoinColumns: [{ name: "attachment_id" }]
+    })
+    attachments: Attachment[];
+
+    @Column({ name: "handle_id", type: "integer", nullable: true, default: 0 })
+    handleId: number;
+
+    @Column({ type: "text", nullable: true })
+    subject: string;
+
+    @Column({ type: "text", nullable: true })
+    country: string;
+
+    @Column({
+        type: "blob",
+        nullable: true,
+        transformer: AttributedBodyTransformer
+    })
+    attributedBody: NSAttributedString[] | null;
+
+    @Column({ type: "integer", nullable: true, default: 0 })
+    version: number;
+
+    @Column({ type: "integer", nullable: true, default: 0 })
+    type: number;
+
+    @Column({ type: "text", nullable: true, default: "iMessage" })
+    service: string;
+
+    @Column({ type: "text", nullable: true })
+    account: string;
+
+    @Column({ name: "account_guid", type: "text", nullable: true })
+    accountGuid: string;
+
+    @Column({
+        type: "integer",
+        nullable: true,
+        default: 0
+    })
+    error: number;
+
+    @Column({
+        name: "date",
+        type: "date",
+        nullable: true,
+        transformer: MessagesDateTransformer
+    })
+    dateCreated: Date;
+
+    @Column({
+        name: "date_read",
+        type: "date",
+        nullable: true,
+        transformer: MessagesDateTransformer
+    })
+    dateRead: Date;
+
+    @Column({
+        name: "date_delivered",
+        type: "date",
+        nullable: true,
+        transformer: MessagesDateTransformer
+    })
+    dateDelivered: Date;
+
+    @Column({
+        name: "is_delivered",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isDelivered: boolean;
+
+    @Column({
+        name: "is_finished",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isFinished: boolean;
+
+    @Column({
+        name: "is_emote",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isEmote: boolean;
+
+    @Column({
+        name: "is_from_me",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isFromMe: boolean;
+
+    @Column({
+        name: "is_empty",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isEmpty: boolean;
+
+    @Column({
+        name: "is_delayed",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isDelayed: boolean;
+
+    @Column({
+        name: "is_auto_reply",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isAutoReply: boolean;
+
+    @Column({
+        name: "is_prepared",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isPrepared: boolean;
+
+    @Column({
+        name: "is_read",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isRead: boolean;
+
+    @Column({
+        name: "is_system_message",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isSystemMessage: boolean;
+
+    @Column({
+        name: "is_sent",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isSent: boolean;
+
+    @Column({
+        name: "has_dd_results",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    hasDdResults: boolean;
+
+    @Column({
+        name: "is_service_message",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isServiceMessage: boolean;
+
+    @Column({
+        name: "is_forward",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isForward: boolean;
+
+    @Column({
+        name: "was_downgraded",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    wasDowngraded: boolean;
+
+    @Column({
+        name: "is_archive",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isArchived: boolean;
+
+    @Column({
+        name: "cache_has_attachments",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    cacheHasAttachments: boolean;
+
+    @Column({ name: "cache_roomnames", type: "text", nullable: true })
+    cacheRoomnames: string;
+
+    @Column({
+        name: "was_data_detected",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    wasDataDetected: boolean;
+
+    @Column({
+        name: "was_deduplicated",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    wasDeduplicated: boolean;
+
+    @Column({
+        name: "is_audio_message",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isAudioMessage: boolean;
+
+    @Column({
+        name: "is_played",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isPlayed: boolean;
+
+    @Column({
+        name: "date_played",
+        type: "integer",
+        transformer: MessagesDateTransformer,
+        default: 0
+    })
+    datePlayed: Date;
+
+    @Column({ name: "item_type", type: "integer", default: 0 })
+    itemType: number;
+
+    @Column({
+        name: "other_handle",
+        type: "integer",
+        nullable: true,
+        default: 0
+    })
+    otherHandle: number;
+
+    @Column({ name: "group_title", type: "text" })
+    groupTitle: string;
+
+    @Column({ name: "group_action_type", type: "integer", default: 0 })
+    groupActionType: number;
+
+    @Column({ name: "share_status", type: "integer", default: 0 })
+    shareStatus: number;
+
+    @Column({ name: "share_direction", type: "integer", default: 0 })
+    shareDirection: number;
+
+    @Column({
+        name: "is_expirable",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isExpirable: boolean;
+
+    @Column({
+        name: "expire_state",
+        type: "integer",
+        transformer: BooleanTransformer,
+        default: 0
+    })
+    isExpired: boolean;
+
+    @Column({
+        name: "message_action_type",
+        type: "integer",
+        default: 0
+    })
+    messageActionType: number;
+
+    @Column({
+        name: "message_source",
+        type: "integer",
+        default: 0
+    })
+    messageSource: number;
+
+    @conditional(
+        isMinSierra,
+        Column({
+            name: "associated_message_guid",
+            type: "text",
+            nullable: true
+        })
+    )
+    associatedMessageGuid: string;
+
+    @conditional(
+        isMinSierra,
+        Column({
+            name: "associated_message_type",
+            type: "text",
+            transformer: MessageTypeTransformer,
+            nullable: true
+        })
+    )
+    associatedMessageType: string;
+
+    @conditional(isMinHighSierra, Column({ name: "balloon_bundle_id", type: "text", nullable: true }))
+    balloonBundleId: string;
+
+    @conditional(
+        isMinHighSierra,
+        Column({
+            name: "payload_data",
+            type: "blob",
+            nullable: true,
+            transformer: AttributedBodyTransformer
+        })
+    )
+    payloadData: NodeJS.Dict<any>[] | null;
+
+    @conditional(isMinHighSierra, Column({ name: "expressive_send_style_id", type: "text", nullable: true }))
+    expressiveSendStyleId: string;
+
+    @conditional(
+        isMinHighSierra,
+        Column({
+            name: "associated_message_range_location",
+            type: "integer",
+            default: 0
+        })
+    )
+    associatedMessageRangeLocation: number;
+
+    @conditional(
+        isMinHighSierra,
+        Column({
+            name: "associated_message_range_length",
+            type: "integer",
+            default: 0
+        })
+    )
+    associatedMessageRangeLength: number;
+
+    @conditional(
+        isMinHighSierra,
+        Column({
+            name: "time_expressive_send_played",
+            type: "integer",
+            transformer: MessagesDateTransformer,
+            default: 0
+        })
+    )
+    timeExpressiveSendPlayed: Date;
+
+    @conditional(
+        isMinHighSierra,
+        Column({
+            name: "message_summary_info",
+            type: "blob",
+            nullable: true,
+            transformer: AttributedBodyTransformer
+        })
+    )
+    messageSummaryInfo: NodeJS.Dict<any>[] | null;
+
+    @conditional(
+        isMinCatalina,
+        Column({
+            name: "reply_to_guid",
+            type: "text",
+            nullable: true
+        })
+    )
+    replyToGuid: string;
+
+    @conditional(
+        isMinCatalina,
+        Column({
+            name: "is_corrupt",
+            type: "integer",
+            transformer: BooleanTransformer,
+            default: 0
+        })
+    )
+    isCorrupt: boolean;
+
+    @conditional(
+        isMinCatalina,
+        Column({
+            name: "is_spam",
+            type: "integer",
+            transformer: BooleanTransformer,
+            default: 0
+        })
+    )
+    isSpam: boolean;
+
+    @conditional(
+        isMinBigSur,
+        Column({
+            name: "thread_originator_guid",
+            type: "text",
+            nullable: true
+        })
+    )
+    threadOriginatorGuid: string;
+
+    @conditional(
+        isMinBigSur,
+        Column({
+            name: "thread_originator_part",
+            type: "text",
+            nullable: true
+        })
+    )
+    threadOriginatorPart: string;
+
+    @conditional(
+        isMinVentura,
+        Column({
+            name: "date_retracted",
+            type: "date",
+            transformer: MessagesDateTransformer,
+            default: 0
+        })
+    )
+    dateRetracted: Date;
+
+    @conditional(
+        isMinVentura,
+        Column({
+            name: "date_edited",
+            type: "date",
+            transformer: MessagesDateTransformer,
+            default: 0
+        })
+    )
+    dateEdited: Date;
+
+    @conditional(
+        isMinVentura,
+        Column({
+            name: "part_count",
+            type: "integer",
+            default: null
+        })
+    )
+    partCount: number;
+
+    @conditional(
+        isMinMonterey,
+        Column({
+            name: "was_delivered_quietly",
+            type: "integer",
+            transformer: BooleanTransformer,
+            default: 0
+        })
+    )
+    wasDeliveredQuietly: boolean;
+
+    @conditional(
+        isMinMonterey,
+        Column({
+            name: "did_notify_recipient",
+            type: "integer",
+            transformer: BooleanTransformer,
+            default: 0
+        })
+    )
+    didNotifyRecipient: boolean;
+
+    get isDigitalTouch(): boolean {
+        return this.balloonBundleId === "com.apple.DigitalTouchBalloonProvider";
+    }
+
+    get isHandwritten(): boolean {
+        return this.balloonBundleId === "com.apple.Handwriting.HandwritingProvider";
+    }
+}
+</file>
+
+<file path="new/helpers/dateUtils.ts">
+import { macOSVersion } from "macos-version";
+import { compareVersions } from "compare-versions";
+
+const osVersion = macOSVersion();
+const MULTIPLIER = 10 ** 6;
+
+/**
+ * Gets the seconds since Jan 1st, 2001. We need this because apple uses this
+ * as their EPOCH time, rather than the true EPOCH
+ */
+export const get2001Time = (): number => {
+    const appleEpoch = new Date("01-01-2001 00:00:00-0:00");
+    return appleEpoch.getTime();
+};
+
+/**
+ * Converts a seconds-since-2001 timestamp to a date object
+ *
+ * @param timestamp The seconds-since-2001
+ */
+export const getDateUsing2001 = (timestamp: number, multiplier = MULTIPLIER): Date => {
+    if (timestamp === 0 || timestamp == null) return null;
+
+    try {
+        let ts = get2001Time();
+        if (!osVersion || compareVersions(osVersion, "10.13.0") >= 0) {
+            ts += timestamp / multiplier;
+        } else {
+            ts += timestamp * 1000;
+        }
+
+        return new Date(ts);
+    } catch (e: any) {
+        console.log(e.message);
+        return null;
+    }
+};
+
+export const getCocoaDate = (timestamp: number): Date => {
+    if (timestamp === 0 || timestamp == null) return null;
+
+    try {
+        let ts = get2001Time();
+        ts += timestamp * 1000;
+        return new Date(ts);
+    } catch (e: any) {
+        console.log(e.message);
+        return null;
+    }
+};
+
+/**
+ * Converts a date object to a seconds-since-2001 timestamp
+ *
+ * @param timestamp The date object to convert
+ */
+export const convertDateTo2001Time = (date: Date): number => {
+    if (date === null) return 0;
+
+    try {
+        let ts = date.getTime() - get2001Time();
+        if (!osVersion || compareVersions(osVersion, "10.13.0") >= 0) ts *= MULTIPLIER;
+        else ts /= 1000;
+
+        return ts;
+    } catch (e: any) {
+        console.log(e.message);
+        return null;
+    }
+};
+
+export const convertDateToCocoaTime = (date: Date): number => {
+    if (date === null) return 0;
+
+    try {
+        let ts = date.getTime() - get2001Time();
+        ts /= 1000;
+        return ts;
+    } catch (e: any) {
+        console.log(e.message);
+        return null;
+    }
+};
+</file>
+
+<file path="new/helpers/utils.ts">
+import { NSAttributedString, Unarchiver } from "node-typedstream";
+
+export const MessagesBasePath = `${process.env.HOME}/Library/Messages`;
+export const invisibleMediaChar = String.fromCharCode(65532);
+
+export const isEmpty = (value: string | Array<any> | NodeJS.Dict<any> | number, trim = true): boolean => {
+    return !isNotEmpty(value, trim);
+};
+
+
+export const isNotEmpty = (value: string | Array<any> | NodeJS.Dict<any> | number, trimEmpty = true): boolean => {
+    if (!value) return false;
+
+    // Handle if the input is a string
+    if (typeof value === "string" && (trimEmpty ? (value as string).trim() : value).length > 0) return true;
+
+    // Handle if the input is a list
+    if (typeof value === "object" && Array.isArray(value)) {
+        if (trimEmpty) return value.filter(i => isNotEmpty(i)).length > 0;
+        return value.length > 0;
+    }
+
+    // Handle if the input is a dictionary
+    if (typeof value === "object" && !Array.isArray(value)) return Object.keys(value).length > 0;
+
+    // If all fails, it's not empty
+    return true;
+};
+
+export const convertAttributedBody = (value: Buffer): any[] => {
+    if (isEmpty(value)) return null;
+
+        try {
+            const attributedBody = Unarchiver.open(value, Unarchiver.BinaryDecoding.decodable).decodeAll();
+            if (isEmpty(attributedBody)) return null;
+
+            let body = null;
+            if (Array.isArray(attributedBody)) {
+                body = attributedBody.map(i => {
+                    if (i.values) {
+                        return i.values.filter((e: any) => {
+                            return e && e instanceof NSAttributedString;
+                        });
+                    } else {
+                        return i;
+                    }
+                });
+            } else {
+                body = attributedBody;
+            }
+
+            // Make sure we don't have nested arrays
+            if (Array.isArray(body)) {
+                body = body.flat();
+            }
+
+            // Make sure all outputs are arrays
+            if (!Array.isArray(body)) {
+                body = [body];
+            }
+
+            return body;
+        } catch (e: any) {
+            console.log(`Failed to deserialize archive: ${e.message}`);
+            // Server().log(`Failed to deserialize archive: ${e.message}`, "debug");
+        }
+
+        return null;
+    }
+
+
+
+
+export const sanitizeStr = (val: string) => {
+    if (!val) return val;
+
+    // Recursively replace all "obj" hidden characters
+    let output = val;
+    while (output.includes(invisibleMediaChar)) {
+        output = output.replace(invisibleMediaChar, "");
+    }
+
+    return safeTrim(output);
+};
+
+export const safeTrim = (value: string) => {
+    return (value ?? "").trim();
+};
+
+
+
+export class AttributedBodyUtils {
+    static extractText(attributedBody: NodeJS.Dict<any> | NodeJS.Dict<any>[]): string | null {
+        if (attributedBody == null) return null;
+        if (!Array.isArray(attributedBody)) {
+            attributedBody = [attributedBody];
+        }
+
+        for (const i of (attributedBody as NodeJS.Dict<any>[])) {
+            if (isNotEmpty(i?.string)) {
+                return i.string;
+            }
+        }
+        
+        return null;
+    }
+}
+
+
+
+
+// export const convertAudio = async (
+//     attachment: Attachment,
+//     {
+//         originalMimeType = null,
+//         dryRun = false
+//     }: {
+//         originalMimeType?: string,
+//         dryRun?: boolean
+//     } = {}
+// ): Promise<string> => {
+//     if (!attachment) return null;
+//     const newPath = getConversionPath(attachment, "mp3");
+//     const mType = originalMimeType ?? attachment.getMimeType();
+//     let failed = false;
+//     let ext = null;
+
+//     if (attachment.uti === "com.apple.coreaudio-format" || mType == "audio/x-caf") {
+//         ext = "caf";
+//     }
+
+//     if (!fs.existsSync(newPath) && !dryRun) {
+//         try {
+//             if (isNotEmpty(ext)) {
+//                 Server().log(`Converting attachment, ${attachment.transferName}, to an MP3...`);
+//                 await FileSystem.convertCafToMp3(attachment.filePath, newPath);
+//             }
+//         } catch (ex: any) {
+//             failed = true;
+//             Server().log(`Failed to convert CAF to MP3 for attachment, ${attachment.transferName}`, "debug");
+//             Server().log(ex?.message ?? ex, "error");
+//         }
+//     } else {
+//         Server().log("Attachment has already been converted! Skipping...", "debug");
+//     }
+
+//     if (!failed && ext && (fs.existsSync(newPath) || dryRun)) {
+//         // If conversion is successful, we need to modify the attachment a bit
+//         attachment.mimeType = "audio/mp3";
+//         attachment.filePath = newPath;
+//         attachment.transferName = basename(newPath).replace(`.${ext}`, ".mp3");
+
+//         // Set the fPath to the newly converted path
+//         return newPath;
+//     }
+
+//     return null;
+// };
+
+// export const convertImage = async (
+//     attachment: Attachment,
+//     {
+//         originalMimeType = null,
+//         dryRun = false
+//     }: {
+//         originalMimeType?: string
+//         dryRun?: boolean
+//     } = {}
+// ): Promise<string> => {
+//     if (!attachment) return null;
+//     const newPath = getConversionPath(attachment, "jpeg");
+//     const mType = originalMimeType ?? attachment.getMimeType();
+//     let failed = false;
+//     let ext: string = null;
+
+//     // Only convert certain types
+//     if (attachment.uti === "public.heic" || mType.startsWith("image/heic")) {
+//         ext = "heic";
+//     } else if (attachment.uti === "public.heif" || mType.startsWith("image/heif")) {
+//         ext = "heif";
+//     } else if (attachment.uti === "public.tiff" || mType.startsWith("image/tiff") || mType.endsWith("tif")) {
+//         ext = "tiff";
+//     }
+
+//     if (!fs.existsSync(newPath) && !dryRun) {
+//         try {
+//             if (isNotEmpty(ext)) {
+//                 Server().log(`Converting image attachment, ${attachment.transferName}, to an JPEG...`);
+//                 await FileSystem.convertToJpg(attachment.filePath, newPath);
+//             }
+//         } catch (ex: any) {
+//             failed = true;
+//             Server().log(`Failed to convert image to JPEG for attachment, ${attachment.transferName}`, "debug");
+//             Server().log(ex?.message ?? ex, "error");
+//         }
+//     } else {
+//         Server().log("Attachment has already been converted! Skipping...", "debug");
+//     }
+
+//     if (!failed && ext && (fs.existsSync(newPath) || dryRun)) {
+//         // If conversion is successful, we need to modify the attachment a bit
+//         attachment.mimeType = "image/jpeg";
+//         attachment.filePath = newPath;
+//         attachment.transferName = basename(newPath).replace(new RegExp(`\\.${ext}$`), ".jpeg");
+
+//         // Set the fPath to the newly converted path
+//         return newPath;
+//     }
+
+//     return null;
+// };
+
+// export const getAttachmentMetadata = async (attachment: Attachment): Promise<Metadata> => {
+//     let metadata: Metadata;
+//     if (attachment.uti !== "com.apple.coreaudio-format" && !attachment.mimeType) return metadata;
+
+//     if (attachment.uti === "com.apple.coreaudio-format" || attachment.mimeType.startsWith("audio")) {
+//         metadata = await FileSystem.getAudioMetadata(attachment.filePath);
+//     } else if (attachment.mimeType.startsWith("image")) {
+//         metadata = await FileSystem.getImageMetadata(attachment.filePath);
+
+//         // Try to get the dimentions from the attachment object iself (attribution info)
+//         const dimensions = attachment.getDimensions();
+//         if (dimensions) {
+//             metadata.height = dimensions.height;
+//             metadata.width = dimensions.width;
+//         }
+
+//         try {
+//             // If we got no height/width data, let's try to fallback to other code to fetch it
+//             if (handledImageMimes.includes(attachment.mimeType) && (!metadata?.height || !metadata?.width)) {
+//                 Server().log("Image metadata empty, getting size from NativeImage...", "debug");
+
+//                 // Load the image data
+//                 const image = nativeImage.createFromPath(FileSystem.getRealPath(attachment.filePath));
+
+//                 // If we were able to load the image, get the size
+//                 if (image) {
+//                     const size = image.getSize();
+
+//                     // If the size if available, set the metadata for it
+//                     if (size?.height && size?.width) {
+//                         // If the metadata is null, let's give it some data
+//                         if (metadata === null) metadata = {};
+//                         metadata.height = size.height;
+//                         metadata.width = size.width;
+//                     }
+//                 }
+//             }
+//         } catch (ex: any) {
+//             Server().log("Failed to load size data from NativeImage!", "debug");
+//         }
+//     } else if (attachment.mimeType.startsWith("video")) {
+//         metadata = await FileSystem.getVideoMetadata(attachment.filePath);
+//     }
+
+//     return metadata;
+// };
+</file>
+
+<file path="new/serializers/AttachmentSerializer.ts">
+// // import { Server } from "@server";
+// import * as fs from "fs";
+// import * as base64 from "byte-base64";
+// import { Metadata } from "@server/fileSystem/types";
+// import { FileSystem } from "@server/fileSystem";
+// import { convertAudio, convertImage, getAttachmentMetadata } from "@server/databases/imessage/helpers/utils";
+// import type { AttachmentResponse } from "../types";
+// import { DEFAULT_ATTACHMENT_CONFIG } from "./constants";
+// import type { AttachmentSerializerMultiParams, AttachmentSerializerSingleParams } from "./types";
+// import { AttachmentInterface } from "../interfaces/attachmentInterface";
+
+// export class AttachmentSerializer {
+//     static async serialize({
+//         attachment,
+//         config = DEFAULT_ATTACHMENT_CONFIG,
+//         isForNotification = false
+//     }: AttachmentSerializerSingleParams): Promise<AttachmentResponse> {
+//         return (
+//             await AttachmentSerializer.serializeList({
+//                 attachments: [attachment],
+//                 config: { ...DEFAULT_ATTACHMENT_CONFIG, ...config },
+//                 isForNotification
+//             })
+//         )[0];
+//     }
+
+//     static async serializeList({
+//         attachments,
+//         config = DEFAULT_ATTACHMENT_CONFIG,
+//         isForNotification = false
+//     }: AttachmentSerializerMultiParams): Promise<AttachmentResponse[]> {
+//         return Promise.all(
+//             attachments.map(
+//                 async attachment =>
+//                     await AttachmentSerializer.convert({
+//                         attachment,
+//                         config: { ...DEFAULT_ATTACHMENT_CONFIG, ...config },
+//                         isForNotification
+//                     })
+//             )
+//         );
+//     }
+
+//     private static async convert({
+//         attachment,
+//         config = DEFAULT_ATTACHMENT_CONFIG,
+//         isForNotification = false
+//     }: AttachmentSerializerSingleParams): Promise<AttachmentResponse> {
+//         let data: Uint8Array | string = null;
+//         let metadata: Metadata = null;
+
+//         // Get the fully qualified path
+//         let fPath = FileSystem.getRealPath(attachment.filePath);
+//         const mimeType = attachment.getMimeType();
+
+//         // If the attachment isn't finished downloading, the path will be null
+//         if (fPath) {
+//             try {
+//                 // If we want to convert the attachment, do so here.
+//                 // So long as we haven't done it yet.
+//                 if (config.convert && !fPath.includes(FileSystem.convertDir)) {
+//                     const converters = [convertImage, convertAudio];
+//                     for (const conversion of converters) {
+//                         // Try to convert the attachments using available converters
+//                         const newPath = await conversion(attachment, { originalMimeType: mimeType });
+//                         if (newPath) {
+//                             fPath = newPath;
+//                             break;
+//                         }
+//                     }
+//                 }
+
+//                 // If the attachment exists, do some things
+//                 const exists = fs.existsSync(fPath);
+//                 if (exists) {
+//                     // If we want data, get the data
+//                     if (config.loadData) {
+//                         data = Uint8Array.from(fs.readFileSync(fPath));
+//                     }
+
+//                     // Fetch the attachment metadata if there is a mimeType
+//                     if (config.loadMetadata) {
+//                         metadata = await getAttachmentMetadata(attachment);
+//                     }
+
+//                     // If there is no data, return null for the data
+//                     // Otherwise, convert it to a base64 string
+//                     if (data) {
+//                         data = base64.bytesToBase64(data as Uint8Array);
+//                     }
+//                 }
+//             } catch (ex: any) {
+//                 // Server().log(`Could not read file [${fPath}]: ${ex?.message ?? String(ex)}`, "error");
+//             }
+//         } else {
+//             // Server().log("Attachment hasn't been downloaded yet!", "debug");
+//         }
+
+//         let output: AttachmentResponse = {
+//             originalROWID: attachment.ROWID,
+//             guid: attachment.guid,
+//             uti: attachment.uti,
+//             mimeType: attachment.mimeType,
+//             transferName: attachment.transferName,
+//             totalBytes: attachment.totalBytes
+//         };
+
+//         if (!isForNotification) {
+//             output = {
+//                 ...output,
+//                 ...{
+//                     transferState: attachment.transferState,
+//                     isOutgoing: attachment.isOutgoing,
+//                     hideAttachment: attachment.hideAttachment,
+//                     isSticker: attachment.isSticker,
+//                     originalGuid: attachment.originalGuid,
+//                     hasLivePhoto: !!AttachmentInterface.getLivePhotoPath(attachment)
+//                 }
+//             };
+//         }
+
+//         if (config.includeMessageGuids) {
+//             output.messages = attachment.messages ? attachment.messages.map(item => item.guid) : [];
+//         }
+
+//         if (config.loadMetadata) {
+//             output = {
+//                 ...output,
+//                 ...{
+//                     height: (metadata?.height ?? 0) as number,
+//                     width: (metadata?.width ?? 0) as number,
+//                     metadata
+//                 }
+//             };
+//         }
+
+//         if (config.loadData) {
+//             output.data = data as string;
+//         }
+
+//         return output;
+//     }
+// }
+</file>
+
+<file path="new/serializers/ChatSerializer.ts">
+import type { ChatResponse } from "../types";
+import { DEFAULT_CHAT_CONFIG, DEFAULT_HANDLE_CONFIG, DEFAULT_MESSAGE_CONFIG } from "./constants";
+import type { ChatSerializerMutliParams, ChatSerializerSingleParams } from "./types";
+import { MessageSerializer } from "./MessageSerializer";
+import { HandleSerializer } from "./HandleSerializer";
+
+export class ChatSerializer {
+    static async serialize({
+        chat,
+        config = DEFAULT_CHAT_CONFIG,
+        messageConfig = DEFAULT_MESSAGE_CONFIG,
+        handleConfig = DEFAULT_HANDLE_CONFIG,
+        isForNotification = false
+    }: ChatSerializerSingleParams): Promise<ChatResponse> {
+        return (
+            await ChatSerializer.serializeList({
+                chats: [chat],
+                config: { ...DEFAULT_CHAT_CONFIG, ...config },
+                messageConfig: { ...DEFAULT_MESSAGE_CONFIG, ...messageConfig },
+                handleConfig: { ...DEFAULT_HANDLE_CONFIG, ...handleConfig },
+                isForNotification
+            })
+        )[0];
+    }
+
+    static async serializeList({
+        chats,
+        config = DEFAULT_CHAT_CONFIG,
+        messageConfig = DEFAULT_MESSAGE_CONFIG,
+        handleConfig = DEFAULT_HANDLE_CONFIG,
+        isForNotification = false
+    }: ChatSerializerMutliParams): Promise<ChatResponse[]> {
+        return Promise.all(
+            chats.map(
+                async chat =>
+                    await ChatSerializer.convert({
+                        chat,
+                        config: { ...DEFAULT_CHAT_CONFIG, ...config },
+                        messageConfig: { ...DEFAULT_MESSAGE_CONFIG, ...messageConfig },
+                        handleConfig: { ...DEFAULT_HANDLE_CONFIG, ...handleConfig },
+                        isForNotification
+                    })
+            )
+        );
+    }
+
+    private static async convert({
+        chat,
+        config = DEFAULT_CHAT_CONFIG,
+        messageConfig = DEFAULT_MESSAGE_CONFIG,
+        handleConfig = DEFAULT_HANDLE_CONFIG,
+        isForNotification = false
+    }: ChatSerializerSingleParams): Promise<ChatResponse> {
+        let output: ChatResponse = {
+            originalROWID: chat.ROWID,
+            guid: chat.guid,
+            style: chat.style,
+            chatIdentifier: chat.chatIdentifier,
+            isArchived: chat.isArchived,
+            displayName: chat.displayName
+        };
+
+        if (config.includeParticipants) {
+            output.participants = await HandleSerializer.serializeList({
+                handles: chat?.participants ?? [],
+                config: {
+                    ...handleConfig,
+                    includeChats: false
+                },
+                messageConfig,
+                chatConfig: config,
+                isForNotification
+            });
+        }
+
+        if (config.includeMessages) {
+            output.messages = await MessageSerializer.serializeList({
+                messages: chat?.messages ?? [],
+                config: {
+                    ...messageConfig,
+                    includeChats: false
+                },
+                isForNotification
+            });
+        }
+
+        if (!isForNotification) {
+            output = {
+                ...output,
+                ...{
+                    isFiltered: chat.isFiltered,
+                    groupId: chat.groupId,
+                    properties: chat.properties,
+                    lastAddressedHandle: chat.lastAddressedHandle
+                }
+            };
+        }
+
+        return output;
+    }
+}
+</file>
+
+<file path="new/serializers/constants.ts">
+export const DEFAULT_ATTACHMENT_CONFIG = {
+    convert: true,
+    loadData: false,
+    loadMetadata: true,
+    includeMessageGuids: false
+};
+
+export const DEFAULT_MESSAGE_CONFIG = {
+    parseAttributedBody: false,
+    parseMessageSummary: false,
+    parsePayloadData: false,
+    loadChatParticipants: true,
+    includeChats: true,
+    enforceMaxSize: false,
+    // Max payload size is 4000 bytes
+    // https://firebase.google.com/docs/cloud-messaging/concept-options#notifications_and_data_messages
+    maxSizeBytes: 4000
+};
+
+export const DEFAULT_CHAT_CONFIG = {
+    includeParticipants: true,
+    includeMessages: false
+};
+
+export const DEFAULT_HANDLE_CONFIG = {
+    includeChats: false,
+    includeMessages: false
+};
+</file>
+
+<file path="new/serializers/HandleSerializer.ts">
+import type { HandleResponse } from "../types";
+import type { HandleSerializerMutliParams, HandleSerializerSingleParams } from "./types";
+import { DEFAULT_CHAT_CONFIG, DEFAULT_HANDLE_CONFIG, DEFAULT_MESSAGE_CONFIG } from "./constants";
+import { MessageSerializer } from "./MessageSerializer";
+import { ChatSerializer } from "./ChatSerializer";
+
+export class HandleSerializer {
+    static async serialize({
+        handle,
+        config = DEFAULT_HANDLE_CONFIG,
+        messageConfig = DEFAULT_MESSAGE_CONFIG,
+        chatConfig = DEFAULT_CHAT_CONFIG,
+        isForNotification = false
+    }: HandleSerializerSingleParams): Promise<HandleResponse> {
+        return (
+            await HandleSerializer.serializeList({
+                handles: [handle],
+                config: { ...DEFAULT_HANDLE_CONFIG, ...config },
+                messageConfig: { ...DEFAULT_MESSAGE_CONFIG, ...messageConfig },
+                chatConfig: { ...DEFAULT_CHAT_CONFIG, ...chatConfig },
+                isForNotification
+            })
+        )[0];
+    }
+
+    static async serializeList({
+        handles,
+        config = DEFAULT_HANDLE_CONFIG,
+        messageConfig = DEFAULT_MESSAGE_CONFIG,
+        chatConfig = DEFAULT_CHAT_CONFIG,
+        isForNotification = false
+    }: HandleSerializerMutliParams): Promise<HandleResponse[]> {
+        return Promise.all(
+            handles.map(
+                async handle =>
+                    await HandleSerializer.convert({
+                        handle,
+                        config: { ...DEFAULT_HANDLE_CONFIG, ...config },
+                        messageConfig: { ...DEFAULT_MESSAGE_CONFIG, ...messageConfig },
+                        chatConfig: { ...DEFAULT_CHAT_CONFIG, ...chatConfig },
+                        isForNotification
+                    })
+            )
+        );
+    }
+
+    private static async convert({
+        handle,
+        config = DEFAULT_HANDLE_CONFIG,
+        messageConfig = DEFAULT_MESSAGE_CONFIG,
+        chatConfig = DEFAULT_CHAT_CONFIG,
+        isForNotification = false
+    }: HandleSerializerSingleParams): Promise<HandleResponse> {
+        let output: HandleResponse = {
+            originalROWID: handle.ROWID,
+            address: handle.id,
+            service: handle.service
+        };
+
+        if (config.includeChats) {
+            output.chats = await ChatSerializer.serializeList({
+                chats: handle?.chats ?? [],
+                config: chatConfig,
+                messageConfig,
+                handleConfig: { includeChats: false, includeMessages: false },
+                isForNotification
+            });
+        }
+
+        if (config.includeMessages) {
+            output.messages = await MessageSerializer.serializeList({
+                messages: handle?.messages ?? [],
+                config: messageConfig,
+                isForNotification
+            });
+        }
+
+        if (!isForNotification) {
+            output = {
+                ...output,
+                ...{
+                    uncanonicalizedId: handle.uncanonicalizedId,
+                    country: handle.country
+                }
+            };
+        }
+
+        return output;
+    }
+}
+</file>
+
+<file path="new/serializers/MessageSerializer.ts">
+// import { Server } from "@server";
+import { isEmpty } from "../helpers/utils";
+import { isMinHighSierra, isMinMonterey, isMinVentura } from "../env";
+import type { HandleResponse, MessageResponse } from "../types";
+// import { AttachmentSerializer } from "./AttachmentSerializer"; //Todo -reenable
+import { ChatSerializer } from "./ChatSerializer";
+import { HandleSerializer } from "./HandleSerializer";
+import { DEFAULT_ATTACHMENT_CONFIG, DEFAULT_MESSAGE_CONFIG } from "./constants";
+import type { MessageSerializerMultiParams, MessageSerializerSingleParams } from "./types";
+
+export class MessageSerializer {
+    static async serialize({
+        message,
+        config = DEFAULT_MESSAGE_CONFIG,
+        attachmentConfig = DEFAULT_ATTACHMENT_CONFIG,
+        isForNotification = false
+    }: MessageSerializerSingleParams): Promise<MessageResponse> {
+        return (
+            await MessageSerializer.serializeList({
+                messages: [message],
+                config: { ...DEFAULT_MESSAGE_CONFIG, ...config },
+                attachmentConfig: { ...DEFAULT_ATTACHMENT_CONFIG, ...attachmentConfig },
+                isForNotification
+            })
+        )[0];
+    }
+
+    static async serializeList({
+        messages,
+        config = DEFAULT_MESSAGE_CONFIG,
+        attachmentConfig = DEFAULT_ATTACHMENT_CONFIG,
+        isForNotification = false
+    }: MessageSerializerMultiParams): Promise<MessageResponse[]> {
+        // Convert the messages to their serialized versions
+        const messageResponses: MessageResponse[] = [];
+        for (const message of messages) {
+            messageResponses.push(
+                await MessageSerializer.convert({
+                    message: message,
+                    config: { ...DEFAULT_MESSAGE_CONFIG, ...config },
+                    attachmentConfig: { ...DEFAULT_ATTACHMENT_CONFIG, ...attachmentConfig },
+                    isForNotification
+                })
+            );
+        }
+
+        // Handle fetching the chat participants with the messages (if requested)
+        const chatCache: { [key: string]: HandleResponse[] } = {};
+        // if (config.loadChatParticipants) {
+        //     for (let i = 0; i < messages.length; i++) {
+        //         // If there aren't any chats for this message, skip it
+        //         if (isEmpty(messages[i]?.chats ?? [])) continue;
+
+        //         // Iterate over the chats for this message and load the participants.
+        //         // We only need to load the participants for group chats since DMs don't have them.
+        //         // Once we load the chat participants for a chat, we will cache it to be used later.
+        //         for (let k = 0; k < (messages[i]?.chats ?? []).length; i++) {
+        //             // If it's not a group, skip it (style == 43; DM = 45)
+        //             // Also skip it if there are already participants
+        //             if (messages[i]?.chats[k].style !== 43 || isNotEmpty(messages[i]?.chats[k].participants)) continue;
+
+        //             // Get the participants for this chat, or load it from our cache
+        //             if (!Object.keys(chatCache).includes(messages[i]?.chats[k].guid)) {
+        //                 const [chats, _] = await Server().iMessageRepo.getChats({
+        //                     chatGuid: messages[i]?.chats[k].guid,
+        //                     withParticipants: true
+        //                 });
+        //                 if (isNotEmpty(chats)) {
+        //                     chatCache[messages[i]?.chats[k].guid] = await HandleSerializer.serializeList({
+        //                         handles: chats[0].participants ?? [],
+        //                         config: { includeChats: false, includeMessages: false }
+        //                     });
+        //                     messageResponses[i].chats[k].participants = chatCache[messages[i]?.chats[k].guid];
+        //                 }
+        //             } else {
+        //                 messageResponses[i].chats[k].participants = chatCache[messages[i].chats[k].guid];
+        //             }
+        //         }
+        //     }
+        // }
+
+        // The parse options are enforced _after_ the convert function is called.
+        // This is so that we can properly extract the text from the attributed body
+        // for those on macOS Ventura. Otherwise, set it to null to not clutter the payload.
+        if (!config.parseAttributedBody || !config.parseMessageSummary || !config.parsePayloadData) {
+            for (let i = 0; i < messageResponses.length; i++) {
+                if (!config.parseAttributedBody && "attributedBody" in messageResponses[i]) {
+                    messageResponses[i].attributedBody = null;
+                }
+
+                if (!config.parseMessageSummary && "messageSummaryInfo" in messageResponses[i]) {
+                    messageResponses[i].messageSummaryInfo = null;
+                }
+
+                if (!config.parsePayloadData && "payloadData" in messageResponses[i]) {
+                    messageResponses[i].payloadData = null;
+                }
+            }
+        }
+
+        if (config.enforceMaxSize) {
+            const strData = JSON.stringify(messageResponses);
+            const len = Buffer.byteLength(strData, "utf8");
+
+            // If we've reached out max size, we need to clear the participants
+            if (len > config.maxSizeBytes) {
+                // Server().log(
+                //     `MessageSerializer: Max size reached (${config.maxSizeBytes} bytes). Clearing participants.`,
+                //     "debug"
+                // );
+                for (let i = 0; i < messageResponses.length; i++) {
+                    for (let c = 0; c < (messageResponses[i]?.chats ?? []).length; c++) {
+                        if (isEmpty(messageResponses[i].chats[c].participants)) continue;
+                        messageResponses[i].chats[c].participants = [];
+                    }
+                }
+            }
+        }
+
+        return messageResponses;
+    }
+
+    private static async convert({
+        message,
+        config = DEFAULT_MESSAGE_CONFIG,
+        attachmentConfig = DEFAULT_ATTACHMENT_CONFIG,
+        isForNotification = false
+    }: MessageSerializerSingleParams): Promise<MessageResponse> {
+        let output: MessageResponse = {
+            originalROWID: message.ROWID,
+            guid: message.guid,
+            text: message.universalText(true),
+            attributedBody: message.attributedBody,
+            handle: message.handle
+                ? await HandleSerializer.serialize({
+                      handle: message.handle,
+                      config: { includeChats: false, includeMessages: false }
+                  })
+                : null,
+            handleId: message.handleId,
+            otherHandle: message.otherHandle,
+            // attachments: await AttachmentSerializer.serializeList({
+            //     attachments: message.attachments ?? [],
+            //     config: attachmentConfig,
+            //     isForNotification
+            // }),
+            attachments: [],
+            subject: message.subject,
+            error: message.error,
+            dateCreated: message.dateCreated ? message.dateCreated.getTime() : null,
+            dateRead: message.dateRead ? message.dateRead.getTime() : null,
+            dateDelivered: message.dateDelivered ? message.dateDelivered.getTime() : null,
+            isDelivered: message.isDelivered,
+            isFromMe: message.isFromMe,
+            hasDdResults: message.hasDdResults,
+            isArchived: message.isArchived,
+            itemType: message.itemType,
+            groupTitle: message.groupTitle,
+            groupActionType: message.groupActionType,
+            balloonBundleId: message.balloonBundleId,
+            associatedMessageGuid: message.associatedMessageGuid,
+            associatedMessageType: message.associatedMessageType,
+            expressiveSendStyleId: message.expressiveSendStyleId,
+            threadOriginatorGuid: message.threadOriginatorGuid,
+            hasPayloadData: !!message.payloadData
+        };
+
+        // Non-essentials
+        if (!isForNotification) {
+            output = {
+                ...output,
+                ...{
+                    country: message.country,
+                    isDelayed: message.isDelayed,
+                    isAutoReply: message.isAutoReply,
+                    isSystemMessage: message.isSystemMessage,
+                    isServiceMessage: message.isServiceMessage,
+                    isForward: message.isForward,
+                    threadOriginatorPart: message.threadOriginatorPart,
+                    isCorrupt: message.isCorrupt,
+                    datePlayed: message.datePlayed ? message.datePlayed.getTime() : null,
+                    cacheRoomnames: message.cacheRoomnames,
+                    isSpam: message.isSpam,
+                    isExpired: message.isExpirable,
+                    timeExpressiveSendPlayed: message.timeExpressiveSendPlayed
+                        ? message.timeExpressiveSendPlayed.getTime()
+                        : null,
+                    isAudioMessage: message.isAudioMessage,
+                    replyToGuid: message.replyToGuid,
+                    shareStatus: message.shareStatus,
+                    shareDirection: message.shareDirection
+                }
+            };
+
+            if (isMinMonterey) {
+                output = {
+                    ...output,
+                    ...{
+                        wasDeliveredQuietly: message.wasDeliveredQuietly ?? false,
+                        didNotifyRecipient: message.didNotifyRecipient ?? false
+                    }
+                };
+            }
+        }
+
+        if (config.includeChats) {
+            output.chats = await ChatSerializer.serializeList({
+                chats: message?.chats ?? [],
+                config: { includeParticipants: false, includeMessages: false },
+                isForNotification
+            });
+        }
+
+        if (isMinHighSierra) {
+            output.messageSummaryInfo = message.messageSummaryInfo;
+            output.payloadData = message.payloadData;
+        }
+
+        if (isMinVentura) {
+            output = {
+                ...output,
+                ...{
+                    dateEdited: message.dateEdited ? message.dateEdited.getTime() : null,
+                    dateRetracted: message.dateRetracted ? message.dateRetracted.getTime() : null,
+                    partCount: message.partCount
+                }
+            };
+        }
+
+        return output;
+    }
+}
+</file>
+
+<file path="new/serializers/types.ts">
+import type { Attachment } from "../entities/Attachment";
+import type { Chat } from "../entities/Chat";
+import type { Message } from "../entities/Message";
+import type { Handle } from "../entities/Handle";
+
+export interface AttachmentSerializerParams {
+    convert?: boolean;
+    loadMetadata?: boolean;
+    loadData?: boolean;
+    includeMessageGuids?: boolean;
+}
+
+export interface ChatSerializerParams {
+    includeParticipants?: boolean;
+    includeMessages?: boolean;
+}
+
+export interface HandleSerializerParams {
+    includeChats?: boolean;
+    includeMessages?: boolean;
+}
+
+export interface MessageSerializerParams {
+    parseAttributedBody?: boolean;
+    parseMessageSummary?: boolean;
+    parsePayloadData?: boolean;
+    includeChats?: boolean;
+    loadChatParticipants?: boolean;
+    enforceMaxSize?: boolean;
+    maxSizeBytes?: number;
+}
+
+export interface MessageSerializerSingleParams {
+    message: Message;
+    config?: MessageSerializerParams;
+    attachmentConfig?: AttachmentSerializerParams;
+    isForNotification?: boolean;
+}
+
+export interface MessageSerializerMultiParams {
+    messages: Message[];
+    config?: MessageSerializerParams;
+    attachmentConfig?: AttachmentSerializerParams;
+    isForNotification?: boolean;
+}
+
+export interface AttachmentSerializerSingleParams {
+    attachment: Attachment;
+    config?: AttachmentSerializerParams;
+    messageConfig?: MessageSerializerParams;
+    isForNotification?: boolean;
+}
+
+export interface AttachmentSerializerMultiParams {
+    attachments: Attachment[];
+    config?: AttachmentSerializerParams;
+    messageConfig?: MessageSerializerParams;
+    isForNotification?: boolean;
+}
+
+export interface ChatSerializerSingleParams {
+    chat: Chat;
+    config?: ChatSerializerParams;
+    messageConfig?: MessageSerializerParams;
+    handleConfig?: HandleSerializerParams;
+    isForNotification?: boolean;
+}
+
+export interface ChatSerializerMutliParams {
+    chats: Chat[];
+    config?: ChatSerializerParams;
+    messageConfig?: MessageSerializerParams;
+    handleConfig?: HandleSerializerParams;
+    isForNotification?: boolean;
+}
+
+export interface HandleSerializerSingleParams {
+    handle: Handle;
+    config?: HandleSerializerParams;
+    messageConfig?: MessageSerializerParams;
+    chatConfig?: ChatSerializerParams;
+    isForNotification?: boolean;
+}
+
+export interface HandleSerializerMutliParams {
+    handles: Handle[];
+    config?: HandleSerializerParams;
+    messageConfig?: MessageSerializerParams;
+    chatConfig?: ChatSerializerParams;
+    isForNotification?: boolean;
+}
+</file>
+
+<file path="new/env.ts">
+import { isMacOSVersionGreaterThanOrEqualTo } from "macos-version";
+
+export const isMinSequoia = isMacOSVersionGreaterThanOrEqualTo("15.0");
+export const isMinSonoma = isMacOSVersionGreaterThanOrEqualTo("14.0");
+export const isMinVentura = isMacOSVersionGreaterThanOrEqualTo("13.0");
+export const isMinMonterey = isMacOSVersionGreaterThanOrEqualTo("12.0");
+export const isMinBigSur = isMacOSVersionGreaterThanOrEqualTo("11.0");
+export const isMinCatalina = isMacOSVersionGreaterThanOrEqualTo("10.15");
+export const isMinMojave = isMacOSVersionGreaterThanOrEqualTo("10.14");
+export const isMinHighSierra = isMacOSVersionGreaterThanOrEqualTo("10.13");
+export const isMinSierra = isMacOSVersionGreaterThanOrEqualTo("10.12");
+</file>
+
+<file path="new/transformers.ts">
+import { type ValueTransformer } from "typeorm";
+
+export const BooleanTransformer: ValueTransformer = {
+    from: dbValue => Boolean(dbValue),
+    to: entityValue => Number(entityValue)
+};
+
+import { convertDateTo2001Time, getDateUsing2001 } from "./helpers/dateUtils";
+import { convertAttributedBody } from "./helpers/utils";
+export const MessagesDateTransformer: ValueTransformer = {
+    from: dbValue => getDateUsing2001(dbValue),
+    to: entityValue => convertDateTo2001Time(entityValue)
+};
+
+
+export const ReactionIdToString: { [key: string]: string } = {
+    0: null,
+    1000: "sticker",
+    2000: "love",
+    2001: "like",
+    2002: "dislike",
+    2003: "laugh",
+    2004: "emphasize",
+    2005: "question",
+    3000: "-love",
+    3001: "-like",
+    3002: "-dislike",
+    3003: "-laugh",
+    3004: "-emphasize",
+    3005: "-question"
+};
+
+export const ReactionStringToId: { [key: string]: number } = {
+    sticker: 1000,
+    love: 2000,
+    like: 2001,
+    dislike: 2002,
+    laugh: 2003,
+    emphasize: 2004,
+    question: 2005,
+    "-love": 3000,
+    "-like": 3001,
+    "-dislike": 3002,
+    "-laugh": 3003,
+    "-emphasize": 3004,
+    "-question": 3005
+};
+
+export const MessageTypeTransformer: ValueTransformer = {
+    from: (dbValue: number) =>
+        Object.keys(ReactionIdToString).includes(dbValue.toString())
+            ? ReactionIdToString[dbValue.toString()]
+            : dbValue.toString(),
+    to: entityValue => ReactionStringToId[entityValue] ?? 0
+};
+
+
+export const AttributedBodyTransformer: ValueTransformer = {
+    from: dbValue => convertAttributedBody(dbValue),
+    to: _ => null
+};
+</file>
+
+<file path="new/types.ts">
+import { NSAttributedString } from "node-typedstream";
+
+export type ServerMetadataResponse = {
+    computer_id: string;
+    os_version: string;
+    server_version: string;
+    private_api: boolean;
+    helper_connected: boolean;
+    proxy_service: string;
+    detected_icloud: string;
+    detected_imessage: string;
+    macos_time_sync: number | null;
+    local_ipv4s: string[];
+    local_ipv6s: string[];
+};
+
+/**
+ * ITEM TYPES:
+ * 0: Text
+ * 1: Removal of person from conversation (groupActionType == 1)
+ * 1: Adding of person to conversation (groupActionType == 0)
+ * 2: Group Name Change
+ * 3: Someone left the conversation (handle_id shows who)
+ */
+export type MessageResponse = {
+    originalROWID: number;
+    tempGuid?: string;
+    guid: string;
+    text: string;
+    attributedBody?: NSAttributedString[];
+    messageSummaryInfo?: NodeJS.Dict<any>[];
+    handle?: HandleResponse | null;
+    handleId: number;
+    otherHandle: number;
+    chats?: ChatResponse[];
+    attachments?: AttachmentResponse[];
+    subject: string;
+    country?: string;
+    error: number;
+    dateCreated: number;
+    dateRead: number | null;
+    dateDelivered: number | null;
+    isFromMe: boolean;
+    isDelayed?: boolean;
+    isDelivered?: boolean;
+    isAutoReply?: boolean;
+    isSystemMessage?: boolean;
+    isServiceMessage?: boolean;
+    isForward?: boolean;
+    isArchived: boolean;
+    hasDdResults?: boolean;
+    cacheRoomnames?: string | null;
+    isAudioMessage?: boolean;
+    datePlayed?: number | null;
+    itemType: number;
+    groupTitle: string | null;
+    groupActionType: number;
+    isExpired?: boolean;
+    balloonBundleId: string | null;
+    associatedMessageGuid: string | null;
+    associatedMessageType: string | null;
+    expressiveSendStyleId: string | null;
+    timeExpressiveSendPlayed?: number | null;
+    replyToGuid?: string | null;
+    isCorrupt?: boolean;
+    isSpam?: boolean;
+    threadOriginatorGuid?: string | null;
+    threadOriginatorPart?: string | null;
+    dateRetracted?: number | null;
+    dateEdited?: number | null;
+    partCount?: number | null;
+    payloadData?: NodeJS.Dict<any>[];
+    hasPayloadData?: boolean;
+    wasDeliveredQuietly?: boolean;
+    didNotifyRecipient?: boolean;
+    shareStatus?: number | null;
+    shareDirection?: number | null;
+};
+
+export type HandleResponse = {
+    originalROWID: number;
+    messages?: MessageResponse[];
+    chats?: ChatResponse[];
+    address: string;
+    service: string;
+    country?: string;
+    uncanonicalizedId?: string;
+};
+
+export type ChatResponse = {
+    originalROWID: number;
+    guid: string;
+    participants?: HandleResponse[];
+    messages?: MessageResponse[];
+    lastMessage?: MessageResponse;
+    properties?: NodeJS.Dict<any>[] | null;
+    style: number;
+    chatIdentifier: string;
+    isArchived: boolean;
+    isFiltered?: boolean;
+    displayName: string;
+    groupId?: string;
+    lastAddressedHandle?: string | null;
+};
+
+export type AttachmentResponse = {
+    originalROWID: number;
+    guid: string;
+    messages?: string[];
+    data?: string; // Base64 string
+    blurhash?: string;
+    height?: number;
+    width?: number;
+    uti: string;
+    mimeType: string;
+    transferState?: number;
+    totalBytes: number;
+    isOutgoing?: boolean;
+    transferName: string;
+    isSticker?: boolean;
+    hideAttachment?: boolean;
+    originalGuid?: string;
+    metadata?: { [key: string]: string | boolean | number };
+    hasLivePhoto?: boolean;
+};
+
+export type ValidTapback = "love" | "like" | "dislike" | "laugh" | "emphasize" | "question";
+export type ValidRemoveTapback = "-love" | "-like" | "-dislike" | "-laugh" | "-emphasize" | "-question";
+export enum ProgressStatus {
+    NOT_STARTED = "NOT_STARTED",
+    IN_PROGRESS = "IN_PROGRESS",
+    COMPLETED = "COMPLETED",
+    FAILED = "FAILED"
+}
+</file>
+
+<file path="env.ts">
+import { isMacOSVersionGreaterThanOrEqualTo } from "macos-version";
+
+export const isMinSequoia = isMacOSVersionGreaterThanOrEqualTo("15.0");
+export const isMinSonoma = isMacOSVersionGreaterThanOrEqualTo("14.0");
+export const isMinVentura = isMacOSVersionGreaterThanOrEqualTo("13.0");
+export const isMinMonterey = isMacOSVersionGreaterThanOrEqualTo("12.0");
+export const isMinBigSur = isMacOSVersionGreaterThanOrEqualTo("11.0");
+export const isMinCatalina = isMacOSVersionGreaterThanOrEqualTo("10.15");
+export const isMinMojave = isMacOSVersionGreaterThanOrEqualTo("10.14");
+export const isMinHighSierra = isMacOSVersionGreaterThanOrEqualTo("10.13");
+export const isMinSierra = isMacOSVersionGreaterThanOrEqualTo("10.12");
+</file>
+
+<file path="events.ts">
+export const SCHEDULED_MESSAGE_ERROR = "scheduled-message-error";
+export const SCHEDULED_MESSAGE_SENT = "scheduled-message-sent";
+export const SCHEDULED_MESSAGE_DELETED = "scheduled-message-deleted";
+export const SCHEDULED_MESSAGE_UPDATED = "scheduled-message-updated";
+export const SCHEDULED_MESSAGE_CREATED = "scheduled-message-created";
+export const NEW_MESSAGE = "new-message";
+export const MESSAGE_SEND_ERROR = "message-send-error";
+export const MESSAGE_UPDATED = "updated-message";
+export const NEW_SERVER = "new-server";
+export const PARTICIPANT_REMOVED = "participant-removed";
+export const PARTICIPANT_ADDED = "participant-added";
+export const PARTICIPANT_LEFT = "participant-left";
+export const GROUP_ICON_CHANGED = "group-icon-changed";
+export const GROUP_ICON_REMOVED = "group-icon-removed";
+export const CHAT_READ_STATUS_CHANGED = "chat-read-status-changed";
+export const HELLO_WORLD = "hello-world";
+export const TYPING_INDICATOR = "typing-indicator";
+export const SERVER_UPDATE = "server-update";
+export const SERVER_UPDATE_DOWNLOADING = "server-update-downloading";
+export const SERVER_UPDATE_INSTALLING = "server-update-installing";
+export const GROUP_NAME_CHANGE = "group-name-change";
+export const INCOMING_FACETIME = "incoming-facetime";
+export const SETTINGS_BACKUP_CREATED = "settings-backup-created";
+export const SETTINGS_BACKUP_DELETED = "settings-backup-deleted";
+export const SETTINGS_BACKUP_UPDATED = "settings-backup-updated";
+export const THEME_BACKUP_CREATED = "theme-backup-created";
+export const THEME_BACKUP_DELETED = "theme-backup-deleted";
+export const THEME_BACKUP_UPDATED = "theme-backup-updated";
+export const IMESSAGE_ALIASES_REMOVED = "imessage-aliases-removed";
+export const FT_CALL_STATUS_CHANGED = "ft-call-status-changed";
+export const NEW_FINDMY_LOCATION = "new-findmy-location";
+</file>
+
+<file path="index.ts">
+import "reflect-metadata";
+console.log("A")
+
+// SCRIPT START
+// Necessary for TypeORM
+import { DataSource, SelectQueryBuilder, Brackets } from "typeorm";
+
+console.log("B")
+
+
+// --- Assume these files are copied into your script's directory or paths are adjusted ---
+// You would need to ensure all transitive dependencies of these files are also available.
+
+// ENTITIES (FROM: packages/server/src/server/databases/imessage/entity/)
+import { Message } from './new/entities/Message'; // Assume Message.ts is in the same directory or path adjusted
+
+console.log("C")
+
+import { Handle } from './new/entities/Handle';   // Assume Handle.ts is in the same directory or path adjusted
+console.log("D")
+import { Chat } from './new/entities/Chat';     // Assume Chat.ts is in the same directory or path adjusted
+console.log("E")
+import { Attachment } from './new/entities/Attachment'; // Assume Attachment.ts is in the same directory or path adjusted
+console.log("F")
+
+// HELPERS (FROM: packages/server/src/server/databases/imessage/helpers/)
+import { convertDateTo2001Time } from './new/helpers/dateUtils'; // Assume dateUtil.ts is in the same directory or path adjusted
+
+// SERIALIZERS (FROM: packages/server/src/server/api/serializers/)
+import { MessageSerializer } from './new/serializers/MessageSerializer'; // Assume MessageSerializer.ts is in the same directory or path adjusted
+// MessageSerializer itself depends on HandleSerializer, ChatSerializer, AttachmentSerializer.
+// For this script to fully work, those would need to be present too.
+// We will make serializer configs minimal to reduce deep dependencies for this example.
+import { DEFAULT_ATTACHMENT_CONFIG, DEFAULT_MESSAGE_CONFIG } from './new/serializers/constants';
+
+// --- END OF ASSUMED COPIED/IMPORTED FILES ---
+
+
+// --- CORE LOGIC ---
+
+const DB_PATH = `${process.env.HOME}/Library/Messages/chat.db`;
+let dataSource: DataSource | null = null;
+
+// Minimal configuration for MessageSerializer for this script's purpose
+const SCRIPT_MESSAGE_SERIALIZER_CONFIG = {
+    ...DEFAULT_MESSAGE_CONFIG,
+    loadChatParticipants: false, // Avoids needing full participant loading logic for simplicity
+    includeChats: true,          // We want to know which chat it belongs to
+    enforceMaxSize: false,
+    parseAttributedBody: true,   // For universalText
+    parseMessageSummary: true,   // For edits/unsends
+    parsePayloadData: false      // Usually not critical for basic display
+};
+
+const SCRIPT_ATTACHMENT_SERIALIZER_CONFIG = {
+    ...DEFAULT_ATTACHMENT_CONFIG,
+    loadData: false,             // Don't load attachment bytes
+    loadMetadata: true
+};
+
+
+
+/**
+ * Initializes a connection to the iMessage database.
+ */
+async function initializeDatabase(): Promise<boolean> {
+    try {
+        dataSource = new DataSource({
+            name: "iMessageMinimalScript",
+            type: "better-sqlite3",
+            database: DB_PATH,
+            entities: [Message, Handle, Chat, Attachment],
+            // Transformers are part of the entities, so they'll be used automatically
+            // logging: ["query", "error"] // Uncomment for debugging DB queries
+        });
+        await dataSource.initialize();
+        console.log("Successfully connected to iMessage database.");
+        return true;
+    } catch (e: any) {
+        console.error(`Failed to connect to iMessage database at ${DB_PATH}:`, e.message);
+        console.error("Please ensure you have Full Disk Access for the terminal/application running this script.");
+        dataSource = null;
+        return false;
+    }
+}
+
+/**
+ * Fetches new incoming messages from the database since a given timestamp.
+ * This is a simplified version of what MessagePoller and MessageRepository do.
+ */
+async function getNewIncomingMessages(afterTimestamp: Date): Promise<Message[]> {
+    if (!dataSource || !dataSource.isInitialized) {
+        console.error("Database not initialized. Call initializeDatabase() first.");
+        return [];
+    }
+
+    // Look back a bit further and then filter precisely in JS to leverage indexed `dateCreated`
+    // This is an optimization from the original codebase.
+    const lookbackBufferMs = 15 * 60 * 1000; // 15 minutes buffer for updates to slightly older messages
+    const queryStartDate = new Date(afterTimestamp.getTime() - lookbackBufferMs);
+
+    const query = dataSource
+        .getRepository(Message)
+        .createQueryBuilder("message")
+        .leftJoinAndSelect("message.handle", "handle") // For sender info
+        .leftJoinAndSelect("message.attachments", "attachment") // For attachment info
+        .innerJoinAndSelect("message.chats", "chat") // Messages always belong to a chat
+        .where("message.is_from_me = :isFromMe", { isFromMe: 0 }) // Only incoming messages
+        .andWhere(
+            new Brackets(qb => {
+                // Primary condition: new messages created after the timestamp
+                qb.where("message.date >= :afterDate", { afterDate: convertDateTo2001Time(queryStartDate) })
+                    // OR messages edited after the timestamp (for updates like edits/unsends)
+                    .orWhere("message.date_edited >= :afterDateEdited", { afterDateEdited: convertDateTo2001Time(queryStartDate) })
+            })
+        )
+        .orderBy("message.date", "ASC"); // Process in chronological order
+
+    const dbMessages = await query.getMany();
+
+    // Precise filtering for "newness"
+    const actualAfterTime = afterTimestamp.getTime();
+    return dbMessages.filter(msg => {
+        const createdTime = msg.dateCreated?.getTime() ?? 0;
+        const editedTime = msg.dateEdited?.getTime() ?? 0;
+
+        // Is it a brand new message received after our last check?
+        const isNew = createdTime >= actualAfterTime;
+        // Or, is it an older message that was edited/unsent after our last check?
+        const isRecentUpdate = editedTime >= actualAfterTime || (msg.hasUnsentParts && createdTime >= queryStartDate.getTime());
+
+        return isNew || isRecentUpdate;
+    });
+}
+
+
+async function getAllMessages(afterTimestamp: Date): Promise<Message[]> {
+    if (!dataSource || !dataSource.isInitialized) {
+        console.error("Database not initialized. Call initializeDatabase() first.");
+        return [];
+    }
+
+    const lookbackBufferMs = 15 * 60 * 1000;
+    const queryStartDate = new Date(afterTimestamp.getTime() - lookbackBufferMs);
+
+    const query = dataSource
+        .getRepository(Message)
+        .createQueryBuilder("message")
+        .leftJoinAndSelect("message.handle", "handle")
+        .leftJoinAndSelect("message.attachments", "attachment")
+        .innerJoinAndSelect("message.chats", "chat")
+        .andWhere(
+            new Brackets(qb => {
+                qb.where("message.date >= :afterDate", { afterDate: convertDateTo2001Time(queryStartDate) })
+                    .orWhere("message.date_edited >= :afterDateEdited", { afterDateEdited: convertDateTo2001Time(queryStartDate) });
+            })
+        )
+        .orderBy("message.date", "ASC");
+
+    const dbMessages = await query.getMany();
+
+    const actualAfterTime = afterTimestamp.getTime();
+    return dbMessages.filter(msg => {
+        const createdTime = msg.dateCreated?.getTime() ?? 0;
+        const editedTime = msg.dateEdited?.getTime() ?? 0;
+
+        const isNew = createdTime >= actualAfterTime;
+        const isRecentUpdate = editedTime >= actualAfterTime || (msg.hasUnsentParts && createdTime >= queryStartDate.getTime());
+
+        return isNew || isRecentUpdate;
+    });
+}
+
+/**
+ * Main polling function.
+ */
+async function pollForNewMessages(lastPollTime: Date): Promise<Date> {
+    if (!dataSource) return lastPollTime;
+
+    console.log(`[${new Date().toISOString()}] Checking for new messages since ${lastPollTime.toISOString()}`);
+    const newMessages = await getAllMessages(lastPollTime);
+
+    if (newMessages.length > 0) {
+        console.log(`Found ${newMessages.length} new/updated incoming message(s):`);
+        for (const msg of newMessages) {
+            console.log({msg});
+            try {
+                // Transform the Message entity into a MessageResponse-like object
+                const serializedMsg = await MessageSerializer.serialize({
+                    message: msg,
+                    config: SCRIPT_MESSAGE_SERIALIZER_CONFIG,
+                    attachmentConfig: SCRIPT_ATTACHMENT_SERIALIZER_CONFIG,
+                    isForNotification: false // Get full details
+                });
+
+                // Output a summary (you can do whatever you want with serializedMsg)
+                console.log("  ----------------------------------------");
+                console.log(`  GUID: ${serializedMsg.guid}`);
+                console.log(`  From: ${serializedMsg.handle?.address ?? 'Unknown'}`);
+                console.log(`  Text: "${serializedMsg.text?.substring(0, 100) ?? ''}${serializedMsg.text && serializedMsg.text.length > 100 ? "..." : ""}"`);
+                console.log(`  Date: ${new Date(serializedMsg.dateCreated).toLocaleString()}`);
+
+                if (serializedMsg.dateEdited) {
+                    console.log(`  Edited: ${new Date(serializedMsg.dateEdited).toLocaleString()}`);
+                }
+
+                if (serializedMsg.isArchived) {
+                    console.log(`  Status: Archived`);
+                }
+
+                console.log(`  Attachments: ${serializedMsg.attachments?.length ?? 0}`);
+                console.log(`  Is From Me: ${serializedMsg.isFromMe}`);
+                console.log(`  Chat GUIDs: ${serializedMsg.chats?.map(c => c.guid).join(', ')}`);
+
+                // 🔁 Check if it's a reply
+                if (serializedMsg.replyToGuid) {
+                    console.log(`  ↪ Reply to GUID: ${serializedMsg.replyToGuid}`);
+
+                    try {
+                        const repliedTo = await dataSource.getRepository(Message).findOneBy({ guid: serializedMsg.replyToGuid });
+                        if (repliedTo) {
+                            const originalText = repliedTo.universalText?.() ?? "<No Text>";
+                            console.log(`  ↪ Replied to text: "${originalText}"`);
+                        } else {
+                            console.log(`  ↪ Original message not found in database.`);
+                        }
+                    } catch (err) {
+                        console.log(`  ↪ Error fetching original message: ${err.message}`);
+                    }
+                }
+
+                console.log("  ----------------------------------------");
+            } catch (transformError: any) {
+                console.error(`Error transforming message ${msg.guid}: ${transformError.message}`);
+            }
+        }
+        console.log("  ----------------------------------------");
+    } else {
+        console.log("No new messages found.");
+    }
+
+    return new Date(); // Return current time as the new "last poll time"
+}
+
+/**
+ * Entry point.
+ */
+async function run() {
+    if (!await initializeDatabase()) {
+        return;
+    }
+
+    // Set initial poll time (e.g., 5 minutes ago, or from a saved state)
+    let lastTimestamp = new Date(Date.now() - (5 * 60 * 1000)); // 5 minutes ago
+
+    // Poll immediately, then set an interval
+    lastTimestamp = await pollForNewMessages(lastTimestamp);
+    setInterval(async () => {
+        lastTimestamp = await pollForNewMessages(lastTimestamp);
+    }, 2 * 1000); // Poll every 2 seconds
+
+    // Keep the script alive. In a real app, you'd have a proper shutdown.
+    // process.stdin.resume();
+    process.on('SIGINT', async () => {
+        console.log("SIGINT received, closing database connection...");
+        if (dataSource && dataSource.isInitialized) {
+            await dataSource.destroy();
+        }
+        process.exit(0);
+    });
+}
+
+// --- List of functions and their locations (as per your request) ---
+/*
+File: (this script)
+  - initializeDatabase() - Adapted from `MessageRepository.initialize()`
+  - getNewIncomingMessages() - Core logic adapted from `MessageRepository.getMessages()` and `MessagePoller.poll()` filtering.
+  - pollForNewMessages() - Main polling loop for this script.
+  - run() - Entry point.
+
+Used from `packages/server/src/server/databases/imessage/entity/`:
+  - Message class and its decorators/methods (like `universalText()`).
+  - Handle class and its decorators.
+  - Chat class and its decorators.
+  - Attachment class and its decorators.
+  (These are used by TypeORM to map database rows to objects and apply transformers)
+
+Used from `packages/server/src/server/databases/imessage/helpers/`:
+  - convertDateTo2001Time (from `dateUtil.ts`) - Used in queries.
+
+Used from `packages/server/src/server/api/serializers/`:
+  - MessageSerializer.serialize() (from `MessageSerializer.ts`) - Transforms `Message` entity to `MessageResponse`.
+  - (Implicitly) HandleSerializer, ChatSerializer, AttachmentSerializer if `MessageSerializer` calls them for nested objects.
+  - DEFAULT_MESSAGE_CONFIG, DEFAULT_ATTACHMENT_CONFIG (from `constants.ts`) - Used to configure serialization.
+
+Used from `packages/server/src/server/utils/`:
+  - AttributedBodyUtils.extractText() (implicitly via `Message.universalText()`, from `AttributedBodyUtils.ts`)
+*/
+
+run().catch(console.error);
+// SCRIPT END
+</file>
+
+<file path="package.json">
+{
+  "dependencies": {
+    "@firebase/util": "^1.12.0",
+    "better-sqlite3": "^11.10.0",
+    "blurhash": "^2.0.5",
+    "byte-base64": "^1.1.0",
+    "compare-versions": "^6.1.1",
+    "conditional-decorator": "^0.1.7",
+    "electron": "^36.4.0",
+    "electron-log": "^5.4.0",
+    "google-libphonenumber": "^3.2.41",
+    "macos-version": "^6.0.0",
+    "mime-types": "^3.0.1",
+    "node-mac-permissions": "^2.5.0",
+    "node-typedstream": "^1.4.1",
+    "read-chunk": "^5.0.0",
+    "typeorm": "^0.3.24",
+    "vcf": "^2.1.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  }
+}
+</file>
+
+<file path="tsconfig.json">
+{
+  "compilerOptions": {
+    // Enable latest features
+    "lib": [
+      "ESNext",
+      "DOM"
+    ],
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "allowJs": true,
+    // Bundler mode
+    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": true,
+    "noEmit": false,
+    "noEmitOnError": false,
+    "outDir": "./dist",
+    // Best practices
+    "strict": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    // Some stricter flags (disabled by default)
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noPropertyAccessFromIndexSignature": false,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true
+
+    "baseUrl": ".", // This sets the base directory for paths
+    "paths": {
+      "@server/*": [
+        "./*"
+      ],
+      "@server": [
+        "./server.ts"
+      ]
+    }
+  }
+}
+</file>
+
+<file path="types.ts">
+import { NSAttributedString } from "node-typedstream";
+
+export type ServerMetadataResponse = {
+    computer_id: string;
+    os_version: string;
+    server_version: string;
+    private_api: boolean;
+    helper_connected: boolean;
+    proxy_service: string;
+    detected_icloud: string;
+    detected_imessage: string;
+    macos_time_sync: number | null;
+    local_ipv4s: string[];
+    local_ipv6s: string[];
+};
+
+/**
+ * ITEM TYPES:
+ * 0: Text
+ * 1: Removal of person from conversation (groupActionType == 1)
+ * 1: Adding of person to conversation (groupActionType == 0)
+ * 2: Group Name Change
+ * 3: Someone left the conversation (handle_id shows who)
+ */
+export type MessageResponse = {
+    originalROWID: number;
+    tempGuid?: string;
+    guid: string;
+    text: string;
+    attributedBody?: NSAttributedString[];
+    messageSummaryInfo?: NodeJS.Dict<any>[];
+    handle?: HandleResponse | null;
+    handleId: number;
+    otherHandle: number;
+    chats?: ChatResponse[];
+    attachments?: AttachmentResponse[];
+    subject: string;
+    country?: string;
+    error: number;
+    dateCreated: number;
+    dateRead: number | null;
+    dateDelivered: number | null;
+    isFromMe: boolean;
+    isDelayed?: boolean;
+    isDelivered?: boolean;
+    isAutoReply?: boolean;
+    isSystemMessage?: boolean;
+    isServiceMessage?: boolean;
+    isForward?: boolean;
+    isArchived: boolean;
+    hasDdResults?: boolean;
+    cacheRoomnames?: string | null;
+    isAudioMessage?: boolean;
+    datePlayed?: number | null;
+    itemType: number;
+    groupTitle: string | null;
+    groupActionType: number;
+    isExpired?: boolean;
+    balloonBundleId: string | null;
+    associatedMessageGuid: string | null;
+    associatedMessageType: string | null;
+    expressiveSendStyleId: string | null;
+    timeExpressiveSendPlayed?: number | null;
+    replyToGuid?: string | null;
+    isCorrupt?: boolean;
+    isSpam?: boolean;
+    threadOriginatorGuid?: string | null;
+    threadOriginatorPart?: string | null;
+    dateRetracted?: number | null;
+    dateEdited?: number | null;
+    partCount?: number | null;
+    payloadData?: NodeJS.Dict<any>[];
+    hasPayloadData?: boolean;
+    wasDeliveredQuietly?: boolean;
+    didNotifyRecipient?: boolean;
+    shareStatus?: number | null;
+    shareDirection?: number | null;
+};
+
+export type HandleResponse = {
+    originalROWID: number;
+    messages?: MessageResponse[];
+    chats?: ChatResponse[];
+    address: string;
+    service: string;
+    country?: string;
+    uncanonicalizedId?: string;
+};
+
+export type ChatResponse = {
+    originalROWID: number;
+    guid: string;
+    participants?: HandleResponse[];
+    messages?: MessageResponse[];
+    lastMessage?: MessageResponse;
+    properties?: NodeJS.Dict<any>[] | null;
+    style: number;
+    chatIdentifier: string;
+    isArchived: boolean;
+    isFiltered?: boolean;
+    displayName: string;
+    groupId?: string;
+    lastAddressedHandle?: string | null;
+};
+
+export type AttachmentResponse = {
+    originalROWID: number;
+    guid: string;
+    messages?: string[];
+    data?: string; // Base64 string
+    blurhash?: string;
+    height?: number;
+    width?: number;
+    uti: string;
+    mimeType: string;
+    transferState?: number;
+    totalBytes: number;
+    isOutgoing?: boolean;
+    transferName: string;
+    isSticker?: boolean;
+    hideAttachment?: boolean;
+    originalGuid?: string;
+    metadata?: { [key: string]: string | boolean | number };
+    hasLivePhoto?: boolean;
+};
+
+export type ValidTapback = "love" | "like" | "dislike" | "laugh" | "emphasize" | "question";
+export type ValidRemoveTapback = "-love" | "-like" | "-dislike" | "-laugh" | "-emphasize" | "-question";
+export enum ProgressStatus {
+    NOT_STARTED = "NOT_STARTED",
+    IN_PROGRESS = "IN_PROGRESS",
+    COMPLETED = "COMPLETED",
+    FAILED = "FAILED"
+}
+</file>
+
+</files>
