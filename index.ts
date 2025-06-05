@@ -94,7 +94,7 @@ async function getAllMessages(after: Date): Promise<Message[]> {
 async function pollForNewMessages(lastSeen: Date): Promise<Date> {
   if (!dataSource) return lastSeen;
 
-  console.log(`[${new Date().toISOString()}] Checking for new messages since ${lastSeen.toISOString()}`);
+//   console.log(`[${new Date().toISOString()}] Checking for new messages since ${lastSeen.toISOString()}`);
 
   const rows = await getAllMessages(lastSeen);
 
