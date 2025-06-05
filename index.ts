@@ -119,7 +119,7 @@ async function pollForNewMessages(lastSeen: Date): Promise<Date> {
     }
     console.log("  ───────────────────────────────────────────");
   } else {
-    console.log("No new messages found.");
+    // console.log("No new messages found.");
   }
 
   // advance cursor (exclusive) — pick the newest lastUpdateTime
