@@ -2,7 +2,7 @@
 import { isEmpty } from "../helpers/utils";
 import { isMinHighSierra, isMinMonterey, isMinVentura } from "../env";
 import type { HandleResponse, MessageResponse } from "../types";
-// import { AttachmentSerializer } from "./AttachmentSerializer"; //Todo -reenable
+import { AttachmentSerializer } from "./AttachmentSerializer"; //Todo -reenable
 import { ChatSerializer } from "./ChatSerializer";
 import { HandleSerializer } from "./HandleSerializer";
 import { DEFAULT_ATTACHMENT_CONFIG, DEFAULT_MESSAGE_CONFIG } from "./constants";
@@ -126,6 +126,7 @@ export class MessageSerializer {
         attachmentConfig = DEFAULT_ATTACHMENT_CONFIG,
         isForNotification = false
     }: MessageSerializerSingleParams): Promise<MessageResponse> {
+        // console.log('[MessageSerializer.convert] Pre-convert',{message: JSON.stringify(message, null, 2)});
         let output: MessageResponse = {
             originalROWID: message.ROWID,
             guid: message.guid,
@@ -139,12 +140,12 @@ export class MessageSerializer {
                 : null,
             handleId: message.handleId,
             otherHandle: message.otherHandle,
-            // attachments: await AttachmentSerializer.serializeList({
-            //     attachments: message.attachments ?? [],
-            //     config: attachmentConfig,
-            //     isForNotification
-            // }),
-            attachments: [],
+            attachments: await AttachmentSerializer.serializeList({
+                attachments: message.attachments ?? [],
+                config: attachmentConfig,
+                isForNotification
+            }),
+            // attachments: [],
             subject: message.subject,
             error: message.error,
             dateCreated: message.dateCreated ? message.dateCreated.getTime() : null,
@@ -206,7 +207,7 @@ export class MessageSerializer {
         if (config.includeChats) {
             output.chats = await ChatSerializer.serializeList({
                 chats: message?.chats ?? [],
-                config: { includeParticipants: false, includeMessages: false },
+                config: { includeParticipants: true, includeMessages: false },
                 isForNotification
             });
         }

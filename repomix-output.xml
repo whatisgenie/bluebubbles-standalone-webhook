@@ -46,9 +46,14 @@ new/
     Chat.ts
     Handle.ts
     Message.ts
+  fileSystem/
+    index.ts
+    types.ts
   helpers/
     dateUtils.ts
     utils.ts
+  interfaces/
+    attachmentInterface.ts
   serializers/
     AttachmentSerializer.ts
     ChatSerializer.ts
@@ -59,6 +64,9 @@ new/
   env.ts
   transformers.ts
   types.ts
+webhook/
+  index.ts
+.gitignore
 env.ts
 events.ts
 index.ts
@@ -69,6 +77,424 @@ types.ts
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="new/fileSystem/index.ts">
+import * as path from "path";
+import * as child_process from "child_process";
+
+import {
+    parseMetadataString,
+    isNotEmpty,
+    isEmpty,
+} from "../helpers/utils";
+
+import {
+    type AudioMetadata,
+    type MetadataKeyMap,
+    type VideoMetadata,
+    type ImageMetadata,
+    AudioMetadataKeys,
+    MetadataDataTypes,
+    VideoMetadataKeys,
+    ImageMetadataKeys
+} from "./types";
+
+/**
+ * The class used to handle all communications to the App's "filesystem".
+ * The filesystem is the directory dedicated to the app-specific files
+ */
+export class FileSystem {
+
+/**
+ * Asynchronously executes a shell command
+ */
+    static async execShellCommand(cmd: string): Promise<string> {
+        const { exec } = child_process;
+        return new Promise((resolve, reject) => {
+            exec(cmd, (error, stdout, stderr) => {
+                if (error) {
+                    reject(error);
+                }
+
+                resolve(stdout || stderr);
+            });
+        });
+    }
+
+
+    static getRealPath(filePath: string) {
+        let output = filePath;
+        if (isEmpty(output)) return output;
+
+        if (output[0] === "~") {
+            output = path.join(process.env.HOME, output.slice(1));
+        }
+
+        return output;
+    }
+
+    static async convertCafToMp3(originalPath: string, outputPath: string): Promise<void> {
+        const oldPath = FileSystem.getRealPath(originalPath);
+        const output = await FileSystem.execShellCommand(
+            `/usr/bin/afconvert -f m4af -d aac "${oldPath}" "${outputPath}"`
+        );
+        if (isNotEmpty(output) && output.includes("Error:")) {
+            throw Error(`Failed to convert audio to MP3: ${output}`);
+        }
+    }
+
+    static async convertMp3ToCaf(originalPath: string, outputPath: string): Promise<void> {
+        const oldPath = FileSystem.getRealPath(originalPath);
+        const output = await FileSystem.execShellCommand(
+            `/usr/bin/afconvert -f caff -d LEI16@44100 -c 1 "${oldPath}" "${outputPath}"`
+        );
+        if (isNotEmpty(output) && output.includes("Error:")) {
+            throw Error(`Failed to convert audio to CAF: ${output}`);
+        }
+    }
+
+    static async convertToJpg(originalPath: string, outputPath: string): Promise<void> {
+        const oldPath = FileSystem.getRealPath(originalPath);
+        const output = await FileSystem.execShellCommand(
+            `/usr/bin/sips --setProperty "format" "jpeg" "${oldPath}" --out "${outputPath}"`
+        );
+        if (isNotEmpty(output) && output.includes("Error:")) {
+            throw Error(`Failed to convert image to JPEG: ${output}`);
+        }
+    }
+
+    static async isSipDisabled(): Promise<boolean> {
+        const res = ((await FileSystem.execShellCommand(`csrutil status`)) ?? "").trim();
+        return !res.endsWith("enabled.");
+    }
+
+    static async hasFullDiskAccess(): Promise<boolean> {
+        const res = (
+            (await FileSystem.execShellCommand(
+                `defaults read ~/Library/Preferences/com.apple.universalaccessAuthWarning.plist`
+            )) ?? ""
+        ).trim();
+        return res.includes('BlueBubbles.app" = 1') || res.includes('BlueBubbles" = 1');
+    }
+
+    static async getFileMetadata(filePath: string): Promise<{ [key: string]: string }> {
+        try {
+            return parseMetadataString(await FileSystem.execShellCommand(`mdls "${FileSystem.getRealPath(filePath)}"`));
+        } catch (ex: any) {
+            return null;
+        }
+    }
+
+    private static async parseMetadata(filePath: string, parserKeyDefinition: MetadataKeyMap): Promise<any> {
+        const metadata: { [key: string]: string } = await FileSystem.getFileMetadata(filePath);
+        if (!metadata) return null;
+
+        const getNumber = (num: string) => {
+            if (!num) return null;
+
+            try {
+                return Number.parseFloat(num);
+            } catch (ex: any) {
+                return null;
+            }
+        };
+
+        const meta: { [key: string]: any } = {};
+        for (const [key, value] of Object.entries(metadata)) {
+            if (!(key in parserKeyDefinition)) continue;
+
+            // Get the types info for the field
+            const { dataType, metaKey } = parserKeyDefinition[key];
+
+            // Parse the item by type
+            let itemValue: any;
+            switch (dataType) {
+                case MetadataDataTypes.Bool:
+                    itemValue = value === "1";
+                    break;
+                case MetadataDataTypes.Float:
+                    itemValue = getNumber(value);
+                    break;
+                case MetadataDataTypes.Int:
+                    itemValue = Math.trunc(getNumber(value));
+                    break;
+                default:
+                    itemValue = value;
+                    break;
+            }
+
+            meta[metaKey] = itemValue;
+        }
+
+        return meta;
+    }
+
+    static async getAudioMetadata(audioPath: string): Promise<AudioMetadata> {
+        const meta = await FileSystem.parseMetadata(audioPath, AudioMetadataKeys);
+        return meta as AudioMetadata;
+    }
+
+    static async getVideoMetadata(videoPath: string): Promise<VideoMetadata> {
+        const meta = await FileSystem.parseMetadata(videoPath, VideoMetadataKeys);
+        return meta as VideoMetadata;
+    }
+
+    static async getImageMetadata(imagePath: string): Promise<ImageMetadata> {
+        const meta = await FileSystem.parseMetadata(imagePath, ImageMetadataKeys);
+        return meta as ImageMetadata;
+    }
+
+
+
+
+
+
+
+
+
+
+}
+</file>
+
+<file path="new/fileSystem/types.ts">
+export enum MetadataDataTypes {
+    String = 0,
+    Int = 1,
+    Float = 2,
+    Bool = 3
+}
+
+export type Metadata = {
+    [key: string]: string | number | boolean;
+};
+
+export type MetadataKeyMap = {
+    [key: string]: MetadataKV;
+};
+
+export type MetadataKV = {
+    dataType: MetadataDataTypes;
+    metaKey: string;
+};
+
+export type AudioMetadata = {
+    bytes?: number;
+    bitRate?: number;
+    sampleRate?: number;
+    duration?: number;
+};
+
+export const AudioMetadataKeys: MetadataKeyMap = {
+    kMDItemAudioBitRate: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "bitRate"
+    },
+    kMDItemAudioSampleRate: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "sampleRate"
+    },
+    kMDItemDurationSeconds: {
+        dataType: MetadataDataTypes.Float,
+        metaKey: "duration"
+    },
+    kMDItemFSSize: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "bytes"
+    }
+};
+
+export type VideoMetadata = {
+    bytes?: number;
+    height?: number;
+    width?: number;
+    audioBitRate?: number;
+    videoBitRate?: number;
+    duration?: number;
+    profileName?: string;
+};
+
+export const VideoMetadataKeys: MetadataKeyMap = {
+    kMDItemAudioBitRate: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "audioBitRate"
+    },
+    kMDItemVideoBitRate: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "videoBitRate"
+    },
+    kMDItemPixelHeight: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "height"
+    },
+    kMDItemPixelWidth: {
+        dataType: MetadataDataTypes.Float,
+        metaKey: "width"
+    },
+    kMDItemFSSize: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "bytes"
+    },
+    kMDItemDurationSeconds: {
+        dataType: MetadataDataTypes.Float,
+        metaKey: "duration"
+    },
+    kMDItemProfileName: {
+        dataType: MetadataDataTypes.String,
+        metaKey: "profileName"
+    }
+};
+
+export type ImageMetadata = {
+    altitude?: number;
+    aperture?: number;
+    bitsPerSample?: number;
+    colorSpace?: string;
+    exposureTimeSeconds?: number;
+    withFlash?: boolean;
+    focalLength?: number;
+    size?: number;
+    latitude?: number;
+    longitude?: number;
+    orientation?: number;
+    height?: number;
+    width?: number;
+    pixelCount?: number;
+    withRedEye?: boolean;
+    heightDpi?: number;
+    widthDpi?: number;
+    withWhiteBalance?: boolean;
+    profileName?: string;
+    deviceMake?: string;
+    deviceModel?: string;
+};
+
+export const ImageMetadataKeys: MetadataKeyMap = {
+    kMDItemAcquisitionMake: {
+        dataType: MetadataDataTypes.String,
+        metaKey: "deviceMake"
+    },
+    kMDItemAcquisitionModel: {
+        dataType: MetadataDataTypes.String,
+        metaKey: "deviceModel"
+    },
+    kMDItemAltitude: {
+        dataType: MetadataDataTypes.Float,
+        metaKey: "altitude"
+    },
+    kMDItemAperture: {
+        dataType: MetadataDataTypes.Float,
+        metaKey: "aperture"
+    },
+    kMDItemBitsPerSample: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "bitsPerSample"
+    },
+    kMDItemColorSpace: {
+        dataType: MetadataDataTypes.String,
+        metaKey: "colorSpace"
+    },
+    kMDItemExposureTimeSeconds: {
+        dataType: MetadataDataTypes.Float,
+        metaKey: "exposureTimeSeconds"
+    },
+    kMDItemFlashOnOff: {
+        dataType: MetadataDataTypes.Bool,
+        metaKey: "withFlash"
+    },
+    kMDItemFocalLength: {
+        dataType: MetadataDataTypes.Float,
+        metaKey: "focalLength"
+    },
+    kMDItemFSSize: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "size"
+    },
+    kMDItemLatitude: {
+        dataType: MetadataDataTypes.Float,
+        metaKey: "latitude"
+    },
+    kMDItemLongitude: {
+        dataType: MetadataDataTypes.Float,
+        metaKey: "longitude"
+    },
+    kMDItemOrientation: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "orientation"
+    },
+    kMDItemPixelHeight: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "height"
+    },
+    kMDItemPixelWidth: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "width"
+    },
+    kMDItemPixelCount: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "pixelCount"
+    },
+    kMDItemRedEyeOnOff: {
+        dataType: MetadataDataTypes.Bool,
+        metaKey: "withRedEye"
+    },
+    kMDItemResolutionWidthDPI: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "widthDpi"
+    },
+    kMDItemResolutionHeightDPI: {
+        dataType: MetadataDataTypes.Int,
+        metaKey: "heightDpi"
+    },
+    kMDItemWhiteBalance: {
+        dataType: MetadataDataTypes.Bool,
+        metaKey: "withWhiteBalance"
+    },
+    kMDItemProfileName: {
+        dataType: MetadataDataTypes.String,
+        metaKey: "profileName"
+    }
+};
+</file>
+
+<file path="new/interfaces/attachmentInterface.ts">
+import { isNotEmpty } from "../helpers/utils";
+import type { Attachment } from "../entities/Attachment";
+import { isEmpty } from "../helpers/utils";
+import { FileSystem } from "../fileSystem";
+import * as fs from "fs";
+
+export class AttachmentInterface {
+    static livePhotoExts = ["png", "jpeg", "jpg", "heic", "tiff"];
+
+
+    static getLivePhotoPath(attachment: Attachment): string | null {
+        // If we don't have a path, return null
+        const fPath = attachment?.filePath;
+        if (isEmpty(fPath)) return null;
+
+        // Get the existing extension (if any).
+        // If it's been converted, it'll have a double-extension.
+        let ext = fPath.includes('.heic.jpeg') ? 'heic.jpeg' : fPath.split(".").pop() ?? "";
+
+        // If the extension is not an image extension, return null
+        if (!AttachmentInterface.livePhotoExts.includes(ext.toLowerCase())) return null;
+
+        // Escape periods in the extension for the regex
+        ext = ext.replace(/\./g, "\\.");
+    
+        // Get the path to the live photo
+        // Replace the extension with .mov, or add it if there is no extension
+        const livePath = isNotEmpty(ext) ? fPath.replace(new RegExp(`\\.${ext}$`), ".mov") : `${fPath}.mov`;
+        const realPath = FileSystem.getRealPath(livePath);
+
+        // If the live photo doesn't exist, return null
+        if (!fs.existsSync(realPath)) return null;
+
+        // If the .mov file exists, return the path
+        return realPath;
+    }
+}
+</file>
 
 <file path="new/entities/Attachment.ts">
 import { Entity, PrimaryGeneratedColumn, Column, ManyToMany, JoinTable } from "typeorm";
@@ -1101,12 +1527,15 @@ import { NSAttributedString, Unarchiver } from "node-typedstream";
 export const MessagesBasePath = `${process.env.HOME}/Library/Messages`;
 export const invisibleMediaChar = String.fromCharCode(65532);
 
-export const isEmpty = (value: string | Array<any> | NodeJS.Dict<any> | number, trim = true): boolean => {
+
+
+
+export const isEmpty = (value: string | Array<any> | NodeJS.Dict<any> | number | null | undefined, trim = true): boolean => {
     return !isNotEmpty(value, trim);
 };
 
 
-export const isNotEmpty = (value: string | Array<any> | NodeJS.Dict<any> | number, trimEmpty = true): boolean => {
+export const isNotEmpty = (value: string | Array<any> | NodeJS.Dict<any> | number | null | undefined, trimEmpty = true ): boolean => {
     if (!value) return false;
 
     // Handle if the input is a string
@@ -1160,7 +1589,6 @@ export const convertAttributedBody = (value: Buffer): any[] => {
             return body;
         } catch (e: any) {
             console.log(`Failed to deserialize archive: ${e.message}`);
-            // Server().log(`Failed to deserialize archive: ${e.message}`, "debug");
         }
 
         return null;
@@ -1185,8 +1613,6 @@ export const safeTrim = (value: string) => {
     return (value ?? "").trim();
 };
 
-
-
 export class AttributedBodyUtils {
     static extractText(attributedBody: NodeJS.Dict<any> | NodeJS.Dict<any>[]): string | null {
         if (attributedBody == null) return null;
@@ -1206,300 +1632,443 @@ export class AttributedBodyUtils {
 
 
 
+// Ugly stuff
+import { Attachment } from "../entities/Attachment";
+import { FileSystem } from "../fileSystem";
+import type { Metadata } from "../fileSystem/types";
+import * as fs from "fs";
+import { basename } from "path";
 
-// export const convertAudio = async (
-//     attachment: Attachment,
-//     {
-//         originalMimeType = null,
-//         dryRun = false
-//     }: {
-//         originalMimeType?: string,
-//         dryRun?: boolean
-//     } = {}
-// ): Promise<string> => {
-//     if (!attachment) return null;
-//     const newPath = getConversionPath(attachment, "mp3");
-//     const mType = originalMimeType ?? attachment.getMimeType();
-//     let failed = false;
-//     let ext = null;
 
-//     if (attachment.uti === "com.apple.coreaudio-format" || mType == "audio/x-caf") {
-//         ext = "caf";
-//     }
+export const MAX_FILE_SIZE = 157286400;
+export const handledImageMimes = ["image/jpeg", "image/jpg", "image/png", "image/bmp", "image/tiff", "image/gif"];
 
-//     if (!fs.existsSync(newPath) && !dryRun) {
-//         try {
-//             if (isNotEmpty(ext)) {
-//                 Server().log(`Converting attachment, ${attachment.transferName}, to an MP3...`);
-//                 await FileSystem.convertCafToMp3(attachment.filePath, newPath);
-//             }
-//         } catch (ex: any) {
-//             failed = true;
-//             Server().log(`Failed to convert CAF to MP3 for attachment, ${attachment.transferName}`, "debug");
-//             Server().log(ex?.message ?? ex, "error");
-//         }
-//     } else {
-//         Server().log("Attachment has already been converted! Skipping...", "debug");
-//     }
+export const getConversionPath = (attachment: Attachment, extension: string): string => {
+    const guid = attachment.originalGuid ?? attachment.guid;
+    const newDir = `${FileSystem.convertDir}/${guid}`;
+    if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
+    const newName = isEmpty(attachment.transferName) ? guid : attachment.transferName;
 
-//     if (!failed && ext && (fs.existsSync(newPath) || dryRun)) {
-//         // If conversion is successful, we need to modify the attachment a bit
-//         attachment.mimeType = "audio/mp3";
-//         attachment.filePath = newPath;
-//         attachment.transferName = basename(newPath).replace(`.${ext}`, ".mp3");
+    // If the path already has the extension, return it
+    let newPath = `${newDir}/${newName}`;
+    if (newPath.endsWith(`.${extension}`)) return newPath;
 
-//         // Set the fPath to the newly converted path
-//         return newPath;
-//     }
+    // Otherwise, return the path with the extension
+    return `${newDir}/${newName}.${extension}`;
+}
 
-//     return null;
-// };
+export const convertAudio = async (
+    attachment: Attachment,
+    {
+        originalMimeType = null,
+        dryRun = false
+    }: {
+        originalMimeType?: string,
+        dryRun?: boolean
+    } = {}
+): Promise<string | null> => {
+    if (!attachment) return null;
+    const newPath = getConversionPath(attachment, "mp3");
+    const mType = originalMimeType ?? attachment.getMimeType();
+    let failed = false;
+    let ext = null;
 
-// export const convertImage = async (
-//     attachment: Attachment,
-//     {
-//         originalMimeType = null,
-//         dryRun = false
-//     }: {
-//         originalMimeType?: string
-//         dryRun?: boolean
-//     } = {}
-// ): Promise<string> => {
-//     if (!attachment) return null;
-//     const newPath = getConversionPath(attachment, "jpeg");
-//     const mType = originalMimeType ?? attachment.getMimeType();
-//     let failed = false;
-//     let ext: string = null;
+    if (attachment.uti === "com.apple.coreaudio-format" || mType == "audio/x-caf") {
+        ext = "caf";
+    }
 
-//     // Only convert certain types
-//     if (attachment.uti === "public.heic" || mType.startsWith("image/heic")) {
-//         ext = "heic";
-//     } else if (attachment.uti === "public.heif" || mType.startsWith("image/heif")) {
-//         ext = "heif";
-//     } else if (attachment.uti === "public.tiff" || mType.startsWith("image/tiff") || mType.endsWith("tif")) {
-//         ext = "tiff";
-//     }
+    if (!fs.existsSync(newPath) && !dryRun) {
+        try {
+            if (isNotEmpty(ext)) {
+                console.log(`Converting attachment, ${attachment.transferName}, to an MP3...`);
+                await FileSystem.convertCafToMp3(attachment.filePath, newPath);
+            }
+        } catch (ex: any) {
+            failed = true;
+            console.log(`Failed to convert CAF to MP3 for attachment, ${attachment.transferName}`, "debug");
+            console.log(ex?.message ?? ex, "error");
+        }
+    } else {
+        console.log("Attachment has already been converted! Skipping...", "debug");
+    }
 
-//     if (!fs.existsSync(newPath) && !dryRun) {
-//         try {
-//             if (isNotEmpty(ext)) {
-//                 Server().log(`Converting image attachment, ${attachment.transferName}, to an JPEG...`);
-//                 await FileSystem.convertToJpg(attachment.filePath, newPath);
-//             }
-//         } catch (ex: any) {
-//             failed = true;
-//             Server().log(`Failed to convert image to JPEG for attachment, ${attachment.transferName}`, "debug");
-//             Server().log(ex?.message ?? ex, "error");
-//         }
-//     } else {
-//         Server().log("Attachment has already been converted! Skipping...", "debug");
-//     }
+    if (!failed && ext && (fs.existsSync(newPath) || dryRun)) {
+        // If conversion is successful, we need to modify the attachment a bit
+        attachment.mimeType = "audio/mp3";
+        attachment.filePath = newPath;
+        attachment.transferName = basename(newPath).replace(`.${ext}`, ".mp3");
 
-//     if (!failed && ext && (fs.existsSync(newPath) || dryRun)) {
-//         // If conversion is successful, we need to modify the attachment a bit
-//         attachment.mimeType = "image/jpeg";
-//         attachment.filePath = newPath;
-//         attachment.transferName = basename(newPath).replace(new RegExp(`\\.${ext}$`), ".jpeg");
+        // Set the fPath to the newly converted path
+        return newPath;
+    }
 
-//         // Set the fPath to the newly converted path
-//         return newPath;
-//     }
+    return null;
+};
 
-//     return null;
-// };
+export const convertImage = async (
+    attachment: Attachment,
+    {
+        originalMimeType = null,
+        dryRun = false
+    }: {
+        originalMimeType?: string
+        dryRun?: boolean
+    } = {}
+): Promise<string> => {
+    if (!attachment) return null;
+    const newPath = getConversionPath(attachment, "jpeg");
+    const mType = originalMimeType ?? attachment.getMimeType();
+    let failed = false;
+    let ext: string = null;
 
-// export const getAttachmentMetadata = async (attachment: Attachment): Promise<Metadata> => {
-//     let metadata: Metadata;
-//     if (attachment.uti !== "com.apple.coreaudio-format" && !attachment.mimeType) return metadata;
+    // Only convert certain types
+    if (attachment.uti === "public.heic" || mType.startsWith("image/heic")) {
+        ext = "heic";
+    } else if (attachment.uti === "public.heif" || mType.startsWith("image/heif")) {
+        ext = "heif";
+    } else if (attachment.uti === "public.tiff" || mType.startsWith("image/tiff") || mType.endsWith("tif")) {
+        ext = "tiff";
+    }
 
-//     if (attachment.uti === "com.apple.coreaudio-format" || attachment.mimeType.startsWith("audio")) {
-//         metadata = await FileSystem.getAudioMetadata(attachment.filePath);
-//     } else if (attachment.mimeType.startsWith("image")) {
-//         metadata = await FileSystem.getImageMetadata(attachment.filePath);
+    if (!fs.existsSync(newPath) && !dryRun) {
+        try {
+            if (isNotEmpty(ext)) {
+                console.log(`Converting image attachment, ${attachment.transferName}, to an JPEG...`);
+                await FileSystem.convertToJpg(attachment.filePath, newPath);
+            }
+        } catch (ex: any) {
+            failed = true;
+            console.log(`Failed to convert image to JPEG for attachment, ${attachment.transferName}`, "debug");
+            console.log(ex?.message ?? ex, "error");
+        }
+    } else {
+        console.log("Attachment has already been converted! Skipping...", "debug");
+    }
 
-//         // Try to get the dimentions from the attachment object iself (attribution info)
-//         const dimensions = attachment.getDimensions();
-//         if (dimensions) {
-//             metadata.height = dimensions.height;
-//             metadata.width = dimensions.width;
-//         }
+    if (!failed && ext && (fs.existsSync(newPath) || dryRun)) {
+        // If conversion is successful, we need to modify the attachment a bit
+        attachment.mimeType = "image/jpeg";
+        attachment.filePath = newPath;
+        attachment.transferName = basename(newPath).replace(new RegExp(`\\.${ext}$`), ".jpeg");
 
-//         try {
-//             // If we got no height/width data, let's try to fallback to other code to fetch it
-//             if (handledImageMimes.includes(attachment.mimeType) && (!metadata?.height || !metadata?.width)) {
-//                 Server().log("Image metadata empty, getting size from NativeImage...", "debug");
+        // Set the fPath to the newly converted path
+        return newPath;
+    }
 
-//                 // Load the image data
-//                 const image = nativeImage.createFromPath(FileSystem.getRealPath(attachment.filePath));
+    return null;
+};
 
-//                 // If we were able to load the image, get the size
-//                 if (image) {
-//                     const size = image.getSize();
+export const getAttachmentMetadata = async (attachment: Attachment): Promise<Metadata> => {
+    let metadata: Metadata = {};
+    if (attachment.uti !== "com.apple.coreaudio-format" && !attachment.mimeType) return metadata;
 
-//                     // If the size if available, set the metadata for it
-//                     if (size?.height && size?.width) {
-//                         // If the metadata is null, let's give it some data
-//                         if (metadata === null) metadata = {};
-//                         metadata.height = size.height;
-//                         metadata.width = size.width;
-//                     }
-//                 }
-//             }
-//         } catch (ex: any) {
-//             Server().log("Failed to load size data from NativeImage!", "debug");
-//         }
-//     } else if (attachment.mimeType.startsWith("video")) {
-//         metadata = await FileSystem.getVideoMetadata(attachment.filePath);
-//     }
+    if (attachment.uti === "com.apple.coreaudio-format" || attachment.mimeType.startsWith("audio")) {
+        metadata = await FileSystem.getAudioMetadata(attachment.filePath);
+    } else if (attachment.mimeType.startsWith("image")) {
+        metadata = await FileSystem.getImageMetadata(attachment.filePath);
 
-//     return metadata;
-// };
+        // Try to get the dimentions from the attachment object iself (attribution info)
+        const dimensions = attachment.getDimensions();
+        if (dimensions) {
+            metadata.height = dimensions.height;
+            metadata.width = dimensions.width;
+        }
+
+        try {
+            // If we got no height/width data, let's try to fallback to other code to fetch it
+            if (handledImageMimes.includes(attachment.mimeType) && (!metadata?.height || !metadata?.width)) {
+                console.log("Image metadata empty, getting size from NativeImage...", "debug");
+
+                // Load the image data
+                // TODO - remove the NativeImage and do it without electron
+                const image = nativeImage.createFromPath(FileSystem.getRealPath(attachment.filePath));
+
+                // If we were able to load the image, get the size
+                if (image) {
+                    const size = image.getSize();
+
+                    // If the size if available, set the metadata for it
+                    if (size?.height && size?.width) {
+                        // If the metadata is null, let's give it some data
+                        if (metadata === null) metadata = {};
+                        metadata.height = size.height;
+                        metadata.width = size.width;
+                    }
+                }
+            }
+        } catch (ex: any) {
+            console.log("Failed to load size data from NativeImage!", "debug");
+        }
+    } else if (attachment.mimeType.startsWith("video")) {
+        metadata = await FileSystem.getVideoMetadata(attachment.filePath);
+    }
+
+    return metadata;
+};
+
+// TODO - remove the NativeImage and do it without electron
+import { encode as blurhashEncode } from "blurhash";
+export const getBlurHash = async ({
+    image,
+    width = null,
+    height = null,
+    quality = "good",
+    componentX = 3,
+    componentY = 3
+}: {
+    image: NativeImage;
+    height?: number;
+    width?: number;
+    quality?: "good" | "better" | "best";
+    componentX?: number;
+    componentY?: number;
+}): Promise<string> => {
+    const resizeOpts: Electron.ResizeOptions = { quality };
+    if (width) resizeOpts.width = width;
+    if (height) resizeOpts.height = height;
+
+    // Resize the image (with new quality and size if applicable)
+    const calcImage: NativeImage = image.resize({ width, quality: "good" });
+    const size = calcImage.getSize();
+
+    // Compute and return blurhash
+    return blurhashEncode(
+        Uint8ClampedArray.from(calcImage.toBitmap()),
+        size.width,
+        size.height,
+        componentX,
+        componentY
+    );
+};
+
+
+export const resultAwaiter = async ({
+    maxWaitMs = 30000,
+    initialWaitMs = 250,
+    waitMultiplier = 1.5,
+    getData,
+    extraLoopCondition = null,
+    dataLoopCondition = null
+}: {
+    maxWaitMs?: number;
+    initialWaitMs?: number;
+    waitMultiplier?: number;
+    getData: (previousData: any | null) => any;
+    extraLoopCondition?: (data: any | null) => boolean;
+    dataLoopCondition?: (data: any | null) => boolean;
+}): Promise<any | null> => {
+    let waitTime = initialWaitMs;
+    let totalTime = 0;
+
+    // Defaults to false because true means keep looping.
+    // This condition is OR'd with the data loop condition.
+    // If this was true, it would keep looping indefinitely.
+    if (!extraLoopCondition) {
+        extraLoopCondition = _ => false;
+    }
+
+    // Set the default check for the loop condition to be if the data is null.
+    // If it's null, keep looping.
+    if (!dataLoopCondition) {
+        dataLoopCondition = _ => !data;
+    }
+
+    let data = await getData(null);
+    while ((dataLoopCondition(data) || extraLoopCondition(data)) && totalTime < maxWaitMs) {
+        // Give it a bit to execute
+        await waitMs(waitTime);
+        totalTime += waitTime;
+
+        // Re-fetch the message with the updated information
+        data = await getData(data);
+        waitTime = waitTime * waitMultiplier;
+    }
+
+    return data;
+};
+
+
+export const waitMs = async (ms: number) => {
+    return new Promise((resolve, _) => setTimeout(resolve, ms));
+};
+
+
+
+
+// MORE FILESYSTEM STUFF
+
+
+export const parseMetadataString = (metadata: string): { [key: string]: string } => {
+    if (!metadata) return {};
+
+    const output: { [key: string]: string } = {};
+    for (const line of metadata.split("\n")) {
+        if (!line.includes("=")) continue;
+
+        const items = line.split(" = ");
+        if (items.length < 2) continue;
+
+        const value = safeTrim(items[1].replace(/"/g, ""));
+        if (isEmpty(value) || value === "(") continue;
+
+        // If all conditions to parse pass, save the key/value pair
+        output[safeTrim(items[0])] = value;
+    }
+
+    return output;
+};
 </file>
 
 <file path="new/serializers/AttachmentSerializer.ts">
-// // import { Server } from "@server";
-// import * as fs from "fs";
-// import * as base64 from "byte-base64";
-// import { Metadata } from "@server/fileSystem/types";
-// import { FileSystem } from "@server/fileSystem";
-// import { convertAudio, convertImage, getAttachmentMetadata } from "@server/databases/imessage/helpers/utils";
-// import type { AttachmentResponse } from "../types";
-// import { DEFAULT_ATTACHMENT_CONFIG } from "./constants";
-// import type { AttachmentSerializerMultiParams, AttachmentSerializerSingleParams } from "./types";
+// import { Server } from "@server";
+import * as fs from "fs";
+import * as base64 from "byte-base64";
+import type { Metadata } from "../fileSystem/types";
+import { FileSystem } from "../fileSystem";
+import { 
+    getAttachmentMetadata } from "../helpers/utils";
+import type { AttachmentResponse } from "../types";
+import { DEFAULT_ATTACHMENT_CONFIG } from "./constants";
+import type { AttachmentSerializerMultiParams, AttachmentSerializerSingleParams } from "./types";
 // import { AttachmentInterface } from "../interfaces/attachmentInterface";
 
-// export class AttachmentSerializer {
-//     static async serialize({
-//         attachment,
-//         config = DEFAULT_ATTACHMENT_CONFIG,
-//         isForNotification = false
-//     }: AttachmentSerializerSingleParams): Promise<AttachmentResponse> {
-//         return (
-//             await AttachmentSerializer.serializeList({
-//                 attachments: [attachment],
-//                 config: { ...DEFAULT_ATTACHMENT_CONFIG, ...config },
-//                 isForNotification
-//             })
-//         )[0];
-//     }
+export class AttachmentSerializer {
+    
+    static async serialize({
+        attachment,
+        config = DEFAULT_ATTACHMENT_CONFIG,
+        isForNotification = false
+    }: AttachmentSerializerSingleParams): Promise<AttachmentResponse> {
+        return (
+            await AttachmentSerializer.serializeList({
+                attachments: [attachment],
+                config: { ...DEFAULT_ATTACHMENT_CONFIG, ...config },
+                isForNotification
+            })
+        )[0];
+    }
 
-//     static async serializeList({
-//         attachments,
-//         config = DEFAULT_ATTACHMENT_CONFIG,
-//         isForNotification = false
-//     }: AttachmentSerializerMultiParams): Promise<AttachmentResponse[]> {
-//         return Promise.all(
-//             attachments.map(
-//                 async attachment =>
-//                     await AttachmentSerializer.convert({
-//                         attachment,
-//                         config: { ...DEFAULT_ATTACHMENT_CONFIG, ...config },
-//                         isForNotification
-//                     })
-//             )
-//         );
-//     }
+    static async serializeList({
+        attachments,
+        config = DEFAULT_ATTACHMENT_CONFIG,
+        isForNotification = false
+    }: AttachmentSerializerMultiParams): Promise<AttachmentResponse[]> {
+        return Promise.all(
+            attachments.map(
+                async attachment =>
+                    await AttachmentSerializer.convert({
+                        attachment,
+                        config: { ...DEFAULT_ATTACHMENT_CONFIG, ...config },
+                        isForNotification
+                    })
+            )
+        );
+    }
 
-//     private static async convert({
-//         attachment,
-//         config = DEFAULT_ATTACHMENT_CONFIG,
-//         isForNotification = false
-//     }: AttachmentSerializerSingleParams): Promise<AttachmentResponse> {
-//         let data: Uint8Array | string = null;
-//         let metadata: Metadata = null;
+    private static async convert({
+        attachment,
+        config = DEFAULT_ATTACHMENT_CONFIG,
+        isForNotification = false
+    }: AttachmentSerializerSingleParams): Promise<AttachmentResponse> {
+        let data: Uint8Array | string | null = null;
+        let metadata: Metadata | null = null;
 
-//         // Get the fully qualified path
-//         let fPath = FileSystem.getRealPath(attachment.filePath);
-//         const mimeType = attachment.getMimeType();
+        // Get the fully qualified path
+        let fPath = FileSystem.getRealPath(attachment.filePath);
+        const mimeType = attachment.getMimeType();
 
-//         // If the attachment isn't finished downloading, the path will be null
-//         if (fPath) {
-//             try {
-//                 // If we want to convert the attachment, do so here.
-//                 // So long as we haven't done it yet.
-//                 if (config.convert && !fPath.includes(FileSystem.convertDir)) {
-//                     const converters = [convertImage, convertAudio];
-//                     for (const conversion of converters) {
-//                         // Try to convert the attachments using available converters
-//                         const newPath = await conversion(attachment, { originalMimeType: mimeType });
-//                         if (newPath) {
-//                             fPath = newPath;
-//                             break;
-//                         }
-//                     }
-//                 }
+        // If the attachment isn't finished downloading, the path will be null
+        if (fPath) {
+            try {
+                // If we want to convert the attachment, do so here.
+                // So long as we haven't done it yet.
 
-//                 // If the attachment exists, do some things
-//                 const exists = fs.existsSync(fPath);
-//                 if (exists) {
-//                     // If we want data, get the data
-//                     if (config.loadData) {
-//                         data = Uint8Array.from(fs.readFileSync(fPath));
-//                     }
+                //  // TODO - turn back on convert below
 
-//                     // Fetch the attachment metadata if there is a mimeType
-//                     if (config.loadMetadata) {
-//                         metadata = await getAttachmentMetadata(attachment);
-//                     }
+                // if (config.convert && !fPath.includes(FileSystem.convertDir)) {
+                //     const converters = [convertImage, convertAudio];
+                //     for (const conversion of converters) {
+                //         // Try to convert the attachments using available converters
+                //         const newPath = await conversion(attachment, { originalMimeType: mimeType });
+                //         if (newPath) {
+                //             fPath = newPath;
+                //             break;
+                //         }
+                //     }
+                // }
 
-//                     // If there is no data, return null for the data
-//                     // Otherwise, convert it to a base64 string
-//                     if (data) {
-//                         data = base64.bytesToBase64(data as Uint8Array);
-//                     }
-//                 }
-//             } catch (ex: any) {
-//                 // Server().log(`Could not read file [${fPath}]: ${ex?.message ?? String(ex)}`, "error");
-//             }
-//         } else {
-//             // Server().log("Attachment hasn't been downloaded yet!", "debug");
-//         }
+                // If the attachment exists, do some things
+                const exists = fs.existsSync(fPath);
+                if (exists) {
+                    // If we want data, get the data
+                    if (config.loadData) {
+                        data = Uint8Array.from(fs.readFileSync(fPath));
+                    }
 
-//         let output: AttachmentResponse = {
-//             originalROWID: attachment.ROWID,
-//             guid: attachment.guid,
-//             uti: attachment.uti,
-//             mimeType: attachment.mimeType,
-//             transferName: attachment.transferName,
-//             totalBytes: attachment.totalBytes
-//         };
+                    // Fetch the attachment metadata if there is a mimeType
+                    if (config.loadMetadata) {
+                        metadata = await getAttachmentMetadata(attachment);
+                    }
 
-//         if (!isForNotification) {
-//             output = {
-//                 ...output,
-//                 ...{
-//                     transferState: attachment.transferState,
-//                     isOutgoing: attachment.isOutgoing,
-//                     hideAttachment: attachment.hideAttachment,
-//                     isSticker: attachment.isSticker,
-//                     originalGuid: attachment.originalGuid,
-//                     hasLivePhoto: !!AttachmentInterface.getLivePhotoPath(attachment)
-//                 }
-//             };
-//         }
+                    // If there is no data, return null for the data
+                    // Otherwise, convert it to a base64 string
+                    if (data) {
+                        data = base64.bytesToBase64(data as Uint8Array);
+                    }
+                }
+            } catch (ex: any) {
+                // Server().log(`Could not read file [${fPath}]: ${ex?.message ?? String(ex)}`, "error");
+            }
+        } else {
+            // Server().log("Attachment hasn't been downloaded yet!", "debug");
+        }
 
-//         if (config.includeMessageGuids) {
-//             output.messages = attachment.messages ? attachment.messages.map(item => item.guid) : [];
-//         }
+        let output: AttachmentResponse = {
+            originalROWID: attachment.ROWID,
+            guid: attachment.guid,
+            uti: attachment.uti,
+            mimeType: mimeType,
+            transferName: attachment.transferName,
+            totalBytes: attachment.totalBytes
+        };
 
-//         if (config.loadMetadata) {
-//             output = {
-//                 ...output,
-//                 ...{
-//                     height: (metadata?.height ?? 0) as number,
-//                     width: (metadata?.width ?? 0) as number,
-//                     metadata
-//                 }
-//             };
-//         }
+        if (!isForNotification) {
+            output = {
+                ...output,
+                ...{
+                    transferState: attachment.transferState,
+                    isOutgoing: attachment.isOutgoing,
+                    hideAttachment: attachment.hideAttachment,
+                    isSticker: attachment.isSticker,
+                    originalGuid: attachment.originalGuid,
+                    hasLivePhoto: false,
+                    // hasLivePhoto: !!AttachmentInterface.getLivePhotoPath(attachment)
+                }
+            };
+        }
 
-//         if (config.loadData) {
-//             output.data = data as string;
-//         }
+        if (config.includeMessageGuids) {
+            output.messages = attachment.messages ? attachment.messages.map(item => item.guid) : [];
+        }
 
-//         return output;
-//     }
-// }
+        if (config.loadMetadata) {
+            output = {
+                ...output,
+                ...{
+                    height: (metadata?.height ?? 0) as number,
+                    width: (metadata?.width ?? 0) as number,
+                    metadata
+                }
+            };
+        }
+
+        if (config.loadData) {
+            output.data = data as string;
+        }
+
+        return output;
+    }
+}
 </file>
 
 <file path="new/serializers/ChatSerializer.ts">
@@ -1556,6 +2125,9 @@ export class ChatSerializer {
         handleConfig = DEFAULT_HANDLE_CONFIG,
         isForNotification = false
     }: ChatSerializerSingleParams): Promise<ChatResponse> {
+
+        console.log('[ChatSerializer.convert]',{chat: JSON.stringify(chat, null, 2)});
+
         let output: ChatResponse = {
             originalROWID: chat.ROWID,
             guid: chat.guid,
@@ -1608,7 +2180,7 @@ export class ChatSerializer {
 
 <file path="new/serializers/constants.ts">
 export const DEFAULT_ATTACHMENT_CONFIG = {
-    convert: true,
+    convert: false,
     loadData: false,
     loadMetadata: true,
     includeMessageGuids: false
@@ -1939,7 +2511,7 @@ export class MessageSerializer {
         if (config.includeChats) {
             output.chats = await ChatSerializer.serializeList({
                 chats: message?.chats ?? [],
-                config: { includeParticipants: false, includeMessages: false },
+                config: { includeParticipants: true, includeMessages: false },
                 isForNotification
             });
         }
@@ -2274,6 +2846,289 @@ export enum ProgressStatus {
 }
 </file>
 
+<file path="webhook/index.ts">
+/*****************************************************************
+ *  LOOPMESSAGE  WEBHOOK  ADAPTER  —  v2
+ *****************************************************************/
+
+import { randomUUID } from "crypto";
+import type { MessageResponse, ChatResponse } from "../new/types";
+import { DataSource } from "typeorm";
+
+type LoopAlert =
+  | "message_inbound"
+  | "message_sent"
+  | "message_failed"
+  | "message_reaction";
+
+const REACTION_MAP = {
+  love: "love",
+  like: "like",
+  dislike: "dislike",
+  laugh: "laugh",
+  emphasize: "exclaim",
+  question: "question"
+} as const;
+
+const deliveryType = (svc?: string) =>
+  svc?.toLowerCase() === "sms" ? "sms" : "imessage";
+
+const baseFields = (msg: MessageResponse) => ({
+  webhook_id : randomUUID(),
+  api_version: "1.0",
+  message_id : msg.guid,
+  recipient  : msg.handle?.address ?? "unknown",
+  delivery_type: deliveryType(msg.service),
+  text       : msg.text ?? undefined,
+  subject    : msg.subject ?? undefined,
+  group      : buildGroup(msg.chats?.[0])
+});
+
+function buildGroup(chat?: ChatResponse) {
+    console.log({chat: JSON.stringify(chat, null, 2)});
+  if (!chat || chat.style !== 43) return undefined;
+  return {
+    group_id    : chat.guid,
+    name        : chat.displayName ?? undefined,
+    participants: (chat.participants ?? []).map(p => p.address)
+  };
+}
+
+function detectMessageType(m: MessageResponse) {
+  if (m.associatedMessageType) return "reaction";
+  if (m.isAudioMessage)        return "audio";
+  if (m.attachments?.length)   return "attachments";
+  if (m.balloonBundleId?.includes("Sticker")) return "sticker";
+  return "text";
+}
+
+/**
+ * Build webhook payload for *one* serialized Message.
+ */
+export async function buildLoopPayload(
+  m: MessageResponse,
+  db: DataSource
+): Promise<Record<string, any>> {
+  // ----- 1. TAP-BACKS ------------------------------------------------
+  if (m.associatedMessageType) {
+    return {
+      ...baseFields(m),
+      alert_type : "message_reaction" satisfies LoopAlert,
+      message_type: "reaction",
+      reaction   : REACTION_MAP[m.associatedMessageType.replace(/^-/, "") as keyof typeof REACTION_MAP] ?? "unknown",
+      thread_id  : m.threadOriginatorGuid ?? undefined
+    };
+  }
+
+  // Determine direction
+  const inbound = !m.isFromMe;
+  const alert: LoopAlert = inbound ? "message_inbound" : "message_sent";
+
+  const payload: Record<string, any> = {
+    ...baseFields(m),
+    alert_type : alert,
+    message_type: detectMessageType(m),
+    thread_id  : m.threadOriginatorGuid ?? undefined
+  };
+
+  /********* fields common to *both* inbound & sent **********/
+  if (m.attachments?.length) {
+    payload.attachments = m.attachments.map(a => buildDownloadURL(a.guid));
+  }
+
+  /********* extra fields only LoopMessage expects for “sent” *******/
+  if (!inbound) {
+    // You could look at m.isDelivered / m.dateDelivered to refine this
+    payload.success = true;
+  }
+
+  return payload;
+}
+
+/* --- helpers ----------------------------------------------------- */
+function buildDownloadURL(guid: string) {
+  return `file:///Attachments/${guid}`;        // swap for real CDN/S3 URL
+}
+</file>
+
+<file path=".gitignore">
+# Based on https://raw.githubusercontent.com/github/gitignore/main/Node.gitignore
+
+# Logs
+
+logs
+_.log
+npm-debug.log_
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Caches
+
+.cache
+
+# Diagnostic reports (https://nodejs.org/api/report.html)
+
+report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+
+# Runtime data
+
+pids
+_.pid
+_.seed
+*.pid.lock
+
+# Directory for instrumented libs generated by jscoverage/JSCover
+
+lib-cov
+
+# Coverage directory used by tools like istanbul
+
+coverage
+*.lcov
+
+# nyc test coverage
+
+.nyc_output
+
+# Grunt intermediate storage (https://gruntjs.com/creating-plugins#storing-task-files)
+
+.grunt
+
+# Bower dependency directory (https://bower.io/)
+
+bower_components
+
+# node-waf configuration
+
+.lock-wscript
+
+# Compiled binary addons (https://nodejs.org/api/addons.html)
+
+build/Release
+
+# Dependency directories
+
+node_modules/
+jspm_packages/
+
+# Snowpack dependency directory (https://snowpack.dev/)
+
+web_modules/
+
+# TypeScript cache
+
+*.tsbuildinfo
+
+# Optional npm cache directory
+
+.npm
+
+# Optional eslint cache
+
+.eslintcache
+
+# Optional stylelint cache
+
+.stylelintcache
+
+# Microbundle cache
+
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+
+# Optional REPL history
+
+.node_repl_history
+
+# Output of 'npm pack'
+
+*.tgz
+
+# Yarn Integrity file
+
+.yarn-integrity
+
+# dotenv environment variable files
+
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+
+# parcel-bundler cache (https://parceljs.org/)
+
+.parcel-cache
+
+# Next.js build output
+
+.next
+out
+
+# Nuxt.js build / generate output
+
+.nuxt
+dist
+
+# Gatsby files
+
+# Comment in the public line in if your project uses Gatsby and not Next.js
+
+# https://nextjs.org/blog/next-9-1#public-directory-support
+
+# public
+
+# vuepress build output
+
+.vuepress/dist
+
+# vuepress v2.x temp and cache directory
+
+.temp
+
+# Docusaurus cache and generated files
+
+.docusaurus
+
+# Serverless directories
+
+.serverless/
+
+# FuseBox cache
+
+.fusebox/
+
+# DynamoDB Local files
+
+.dynamodb/
+
+# TernJS port file
+
+.tern-port
+
+# Stores VSCode versions used for testing VSCode extensions
+
+.vscode-test
+
+# yarn v2
+
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+
+# IntelliJ based IDEs
+.idea
+
+# Finder (MacOS) folder config
+.DS_Store
+</file>
+
 <file path="env.ts">
 import { isMacOSVersionGreaterThanOrEqualTo } from "macos-version";
 
@@ -2324,29 +3179,19 @@ export const NEW_FINDMY_LOCATION = "new-findmy-location";
 
 <file path="index.ts">
 import "reflect-metadata";
-console.log("A")
 
 // SCRIPT START
 // Necessary for TypeORM
-import { DataSource, SelectQueryBuilder, Brackets } from "typeorm";
-
-console.log("B")
-
+import { DataSource, Brackets } from "typeorm";
 
 // --- Assume these files are copied into your script's directory or paths are adjusted ---
 // You would need to ensure all transitive dependencies of these files are also available.
 
 // ENTITIES (FROM: packages/server/src/server/databases/imessage/entity/)
 import { Message } from './new/entities/Message'; // Assume Message.ts is in the same directory or path adjusted
-
-console.log("C")
-
 import { Handle } from './new/entities/Handle';   // Assume Handle.ts is in the same directory or path adjusted
-console.log("D")
 import { Chat } from './new/entities/Chat';     // Assume Chat.ts is in the same directory or path adjusted
-console.log("E")
 import { Attachment } from './new/entities/Attachment'; // Assume Attachment.ts is in the same directory or path adjusted
-console.log("F")
 
 // HELPERS (FROM: packages/server/src/server/databases/imessage/helpers/)
 import { convertDateTo2001Time } from './new/helpers/dateUtils'; // Assume dateUtil.ts is in the same directory or path adjusted
@@ -2357,6 +3202,8 @@ import { MessageSerializer } from './new/serializers/MessageSerializer'; // Assu
 // For this script to fully work, those would need to be present too.
 // We will make serializer configs minimal to reduce deep dependencies for this example.
 import { DEFAULT_ATTACHMENT_CONFIG, DEFAULT_MESSAGE_CONFIG } from './new/serializers/constants';
+import { buildLoopPayload } from "./webhook";
+import type { MessageResponse } from "./new/types";
 
 // --- END OF ASSUMED COPIED/IMPORTED FILES ---
 
@@ -2474,6 +3321,7 @@ async function getAllMessages(afterTimestamp: Date): Promise<Message[]> {
         .leftJoinAndSelect("message.handle", "handle")
         .leftJoinAndSelect("message.attachments", "attachment")
         .innerJoinAndSelect("message.chats", "chat")
+        .leftJoinAndSelect("chat.participants", "chatParticipants")
         .andWhere(
             new Brackets(qb => {
                 qb.where("message.date >= :afterDate", { afterDate: convertDateTo2001Time(queryStartDate) })
@@ -2502,13 +3350,13 @@ async function getAllMessages(afterTimestamp: Date): Promise<Message[]> {
 async function pollForNewMessages(lastPollTime: Date): Promise<Date> {
     if (!dataSource) return lastPollTime;
 
-    console.log(`[${new Date().toISOString()}] Checking for new messages since ${lastPollTime.toISOString()}`);
+    // console.log(`[${new Date().toISOString()}] Checking for new messages since ${lastPollTime.toISOString()}`);
     const newMessages = await getAllMessages(lastPollTime);
 
     if (newMessages.length > 0) {
         console.log(`Found ${newMessages.length} new/updated incoming message(s):`);
         for (const msg of newMessages) {
-            console.log({msg});
+            console.log({msg: JSON.stringify(msg, null, 2)});
             try {
                 // Transform the Message entity into a MessageResponse-like object
                 const serializedMsg = await MessageSerializer.serialize({
@@ -2518,50 +3366,17 @@ async function pollForNewMessages(lastPollTime: Date): Promise<Date> {
                     isForNotification: false // Get full details
                 });
 
-                // Output a summary (you can do whatever you want with serializedMsg)
-                console.log("  ----------------------------------------");
-                console.log(`  GUID: ${serializedMsg.guid}`);
-                console.log(`  From: ${serializedMsg.handle?.address ?? 'Unknown'}`);
-                console.log(`  Text: "${serializedMsg.text?.substring(0, 100) ?? ''}${serializedMsg.text && serializedMsg.text.length > 100 ? "..." : ""}"`);
-                console.log(`  Date: ${new Date(serializedMsg.dateCreated).toLocaleString()}`);
+                const payload = await buildLoopPayload(serializedMsg, dataSource);
+                console.log({payload: JSON.stringify(payload, null, 2)});
 
-                if (serializedMsg.dateEdited) {
-                    console.log(`  Edited: ${new Date(serializedMsg.dateEdited).toLocaleString()}`);
-                }
-
-                if (serializedMsg.isArchived) {
-                    console.log(`  Status: Archived`);
-                }
-
-                console.log(`  Attachments: ${serializedMsg.attachments?.length ?? 0}`);
-                console.log(`  Is From Me: ${serializedMsg.isFromMe}`);
-                console.log(`  Chat GUIDs: ${serializedMsg.chats?.map(c => c.guid).join(', ')}`);
-
-                // 🔁 Check if it's a reply
-                if (serializedMsg.replyToGuid) {
-                    console.log(`  ↪ Reply to GUID: ${serializedMsg.replyToGuid}`);
-
-                    try {
-                        const repliedTo = await dataSource.getRepository(Message).findOneBy({ guid: serializedMsg.replyToGuid });
-                        if (repliedTo) {
-                            const originalText = repliedTo.universalText?.() ?? "<No Text>";
-                            console.log(`  ↪ Replied to text: "${originalText}"`);
-                        } else {
-                            console.log(`  ↪ Original message not found in database.`);
-                        }
-                    } catch (err) {
-                        console.log(`  ↪ Error fetching original message: ${err.message}`);
-                    }
-                }
-
-                console.log("  ----------------------------------------");
+                // prettyPrintMessage(serializedMsg, dataSource);
             } catch (transformError: any) {
                 console.error(`Error transforming message ${msg.guid}: ${transformError.message}`);
             }
         }
         console.log("  ----------------------------------------");
     } else {
-        console.log("No new messages found.");
+        // console.log("No new messages found.");
     }
 
     return new Date(); // Return current time as the new "last poll time"
@@ -2595,35 +3410,82 @@ async function run() {
     });
 }
 
-// --- List of functions and their locations (as per your request) ---
-/*
-File: (this script)
-  - initializeDatabase() - Adapted from `MessageRepository.initialize()`
-  - getNewIncomingMessages() - Core logic adapted from `MessageRepository.getMessages()` and `MessagePoller.poll()` filtering.
-  - pollForNewMessages() - Main polling loop for this script.
-  - run() - Entry point.
-
-Used from `packages/server/src/server/databases/imessage/entity/`:
-  - Message class and its decorators/methods (like `universalText()`).
-  - Handle class and its decorators.
-  - Chat class and its decorators.
-  - Attachment class and its decorators.
-  (These are used by TypeORM to map database rows to objects and apply transformers)
-
-Used from `packages/server/src/server/databases/imessage/helpers/`:
-  - convertDateTo2001Time (from `dateUtil.ts`) - Used in queries.
-
-Used from `packages/server/src/server/api/serializers/`:
-  - MessageSerializer.serialize() (from `MessageSerializer.ts`) - Transforms `Message` entity to `MessageResponse`.
-  - (Implicitly) HandleSerializer, ChatSerializer, AttachmentSerializer if `MessageSerializer` calls them for nested objects.
-  - DEFAULT_MESSAGE_CONFIG, DEFAULT_ATTACHMENT_CONFIG (from `constants.ts`) - Used to configure serialization.
-
-Used from `packages/server/src/server/utils/`:
-  - AttributedBodyUtils.extractText() (implicitly via `Message.universalText()`, from `AttributedBodyUtils.ts`)
-*/
 
 run().catch(console.error);
 // SCRIPT END
+
+
+function prettyPrintMessage(m: MessageResponse, db: DataSource) {
+    // ---------- helpers ----------
+    const deliveryType = m.handle?.service?.toLowerCase() === "sms" ? "SMS" : "iMessage";
+    const direction    = m.isFromMe ? "SENT" : "INBOUND";
+  
+    const getMessageType = () => {
+      if (m.associatedMessageType)          return "reaction";
+      if (m.isAudioMessage)                 return "audio";
+      if (m.attachments?.length)            return "attachments";
+      if (m.balloonBundleId?.includes("Sticker")) return "sticker";
+      return "text";
+    };
+  
+    const msgType = getMessageType();
+  
+    // ---------- header line ----------
+    console.log("  ----------------------------------------");
+    console.log(
+      `[${direction}] (${deliveryType}) <${msgType}>  GUID:${m.guid}`
+    );
+  
+    // ---------- basic fields ----------
+    console.log(`  From       : ${m.handle?.address ?? "Unknown"}`);
+    console.log(`  Date       : ${new Date(m.dateCreated).toLocaleString()}`);
+    if (m.text) console.log(`  Text       : "${m.text}"`);
+    if (m.subject) console.log(`  Subject    : "${m.subject}"`);
+    if (m.attachments?.length)
+      console.log(`  Attachments: ${m.attachments.length}`);
+  
+    // ---------- reactions ----------
+    if (msgType === "reaction") {
+      const reactedTo = m.associatedMessageGuid?.replace(/^p:\d+\//, "");
+      console.log(`  Reaction   : ${m.associatedMessageType}`);
+      console.log(`  On message : ${reactedTo}`);
+  
+      // (optional) fetch original text for context
+      if (reactedTo) {
+        db.getRepository(Message)
+          .findOneBy({ guid: reactedTo })
+          .then(orig =>
+            console.log(
+              `               "${orig?.universalText?.() ?? "<No Text>"}"`
+            )
+          )
+          .catch(() => {});
+      }
+    }
+  
+    // ---------- replies ----------
+    // Apple sets replyToGuid even for some reactions, so rely on threadOriginatorGuid
+    const threadId = m.threadOriginatorGuid ?? m.replyToGuid;
+    if (threadId && msgType !== "reaction") {
+      console.log(`  Reply-to   : ${threadId}`);
+      db.getRepository(Message)
+        .findOneBy({ guid: threadId })
+        .then(orig =>
+          console.log(
+            `               "${orig?.universalText?.() ?? "<No Text>"}"`
+          )
+        )
+        .catch(() => {});
+    }
+  
+    // ---------- status flags ----------
+    if (m.dateEdited)   console.log(`  ✎ Edited   : ${new Date(m.dateEdited).toLocaleString()}`);
+    if (m.dateRetracted)console.log(`  ✂ Unsent   : ${new Date(m.dateRetracted).toLocaleString()}`);
+    if (m.isArchived)   console.log(`  ☰ Archived`);
+    if (!m.isFromMe && m.wasDeliveredQuietly) console.log("  🔕 Delivered Quietly");
+  
+    console.log("  ----------------------------------------\n");
+  }
 </file>
 
 <file path="package.json">
@@ -2651,7 +3513,8 @@ run().catch(console.error);
   },
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "npx tsx index.ts",
+    "dev": "npx tsx index.ts"
   }
 }
 </file>

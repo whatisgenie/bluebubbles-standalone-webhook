@@ -51,6 +51,7 @@ export class ChatSerializer {
         handleConfig = DEFAULT_HANDLE_CONFIG,
         isForNotification = false
     }: ChatSerializerSingleParams): Promise<ChatResponse> {
+
         let output: ChatResponse = {
             originalROWID: chat.ROWID,
             guid: chat.guid,

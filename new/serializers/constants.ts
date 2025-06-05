@@ -1,5 +1,5 @@
 export const DEFAULT_ATTACHMENT_CONFIG = {
-    convert: true,
+    convert: false,
     loadData: false,
     loadMetadata: true,
     includeMessageGuids: false

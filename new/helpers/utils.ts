@@ -3,12 +3,14 @@ import { NSAttributedString, Unarchiver } from "node-typedstream";
 export const MessagesBasePath = `${process.env.HOME}/Library/Messages`;
 export const invisibleMediaChar = String.fromCharCode(65532);
 
-export const isEmpty = (value: string | Array<any> | NodeJS.Dict<any> | number, trim = true): boolean => {
+
+
+export const isEmpty = (value: string | Array<any> | NodeJS.Dict<any> | number | null | undefined, trim = true): boolean => {
     return !isNotEmpty(value, trim);
 };
 
 
-export const isNotEmpty = (value: string | Array<any> | NodeJS.Dict<any> | number, trimEmpty = true): boolean => {
+export const isNotEmpty = (value: string | Array<any> | NodeJS.Dict<any> | number | null | undefined, trimEmpty = true ): boolean => {
     if (!value) return false;
 
     // Handle if the input is a string
@@ -62,7 +64,6 @@ export const convertAttributedBody = (value: Buffer): any[] => {
             return body;
         } catch (e: any) {
             console.log(`Failed to deserialize archive: ${e.message}`);
-            // Server().log(`Failed to deserialize archive: ${e.message}`, "debug");
         }
 
         return null;
@@ -87,8 +88,6 @@ export const safeTrim = (value: string) => {
     return (value ?? "").trim();
 };
 
-
-
 export class AttributedBodyUtils {
     static extractText(attributedBody: NodeJS.Dict<any> | NodeJS.Dict<any>[]): string | null {
         if (attributedBody == null) return null;
@@ -109,150 +108,76 @@ export class AttributedBodyUtils {
 
 
 
-// export const convertAudio = async (
-//     attachment: Attachment,
-//     {
-//         originalMimeType = null,
-//         dryRun = false
-//     }: {
-//         originalMimeType?: string,
-//         dryRun?: boolean
-//     } = {}
-// ): Promise<string> => {
-//     if (!attachment) return null;
-//     const newPath = getConversionPath(attachment, "mp3");
-//     const mType = originalMimeType ?? attachment.getMimeType();
-//     let failed = false;
-//     let ext = null;
 
-//     if (attachment.uti === "com.apple.coreaudio-format" || mType == "audio/x-caf") {
-//         ext = "caf";
-//     }
 
-//     if (!fs.existsSync(newPath) && !dryRun) {
-//         try {
-//             if (isNotEmpty(ext)) {
-//                 Server().log(`Converting attachment, ${attachment.transferName}, to an MP3...`);
-//                 await FileSystem.convertCafToMp3(attachment.filePath, newPath);
-//             }
-//         } catch (ex: any) {
-//             failed = true;
-//             Server().log(`Failed to convert CAF to MP3 for attachment, ${attachment.transferName}`, "debug");
-//             Server().log(ex?.message ?? ex, "error");
-//         }
-//     } else {
-//         Server().log("Attachment has already been converted! Skipping...", "debug");
-//     }
+export const resultAwaiter = async ({
+    maxWaitMs = 30000,
+    initialWaitMs = 250,
+    waitMultiplier = 1.5,
+    getData,
+    extraLoopCondition = null,
+    dataLoopCondition = null
+}: {
+    maxWaitMs?: number;
+    initialWaitMs?: number;
+    waitMultiplier?: number;
+    getData: (previousData: any | null) => any;
+    extraLoopCondition?: (data: any | null) => boolean;
+    dataLoopCondition?: (data: any | null) => boolean;
+}): Promise<any | null> => {
+    let waitTime = initialWaitMs;
+    let totalTime = 0;
 
-//     if (!failed && ext && (fs.existsSync(newPath) || dryRun)) {
-//         // If conversion is successful, we need to modify the attachment a bit
-//         attachment.mimeType = "audio/mp3";
-//         attachment.filePath = newPath;
-//         attachment.transferName = basename(newPath).replace(`.${ext}`, ".mp3");
+    // Defaults to false because true means keep looping.
+    // This condition is OR'd with the data loop condition.
+    // If this was true, it would keep looping indefinitely.
+    if (!extraLoopCondition) {
+        extraLoopCondition = _ => false;
+    }
 
-//         // Set the fPath to the newly converted path
-//         return newPath;
-//     }
+    // Set the default check for the loop condition to be if the data is null.
+    // If it's null, keep looping.
+    if (!dataLoopCondition) {
+        dataLoopCondition = _ => !data;
+    }
 
-//     return null;
-// };
+    let data = await getData(null);
+    while ((dataLoopCondition(data) || extraLoopCondition(data)) && totalTime < maxWaitMs) {
+        // Give it a bit to execute
+        await waitMs(waitTime);
+        totalTime += waitTime;
 
-// export const convertImage = async (
-//     attachment: Attachment,
-//     {
-//         originalMimeType = null,
-//         dryRun = false
-//     }: {
-//         originalMimeType?: string
-//         dryRun?: boolean
-//     } = {}
-// ): Promise<string> => {
-//     if (!attachment) return null;
-//     const newPath = getConversionPath(attachment, "jpeg");
-//     const mType = originalMimeType ?? attachment.getMimeType();
-//     let failed = false;
-//     let ext: string = null;
+        // Re-fetch the message with the updated information
+        data = await getData(data);
+        waitTime = waitTime * waitMultiplier;
+    }
 
-//     // Only convert certain types
-//     if (attachment.uti === "public.heic" || mType.startsWith("image/heic")) {
-//         ext = "heic";
-//     } else if (attachment.uti === "public.heif" || mType.startsWith("image/heif")) {
-//         ext = "heif";
-//     } else if (attachment.uti === "public.tiff" || mType.startsWith("image/tiff") || mType.endsWith("tif")) {
-//         ext = "tiff";
-//     }
+    return data;
+};
 
-//     if (!fs.existsSync(newPath) && !dryRun) {
-//         try {
-//             if (isNotEmpty(ext)) {
-//                 Server().log(`Converting image attachment, ${attachment.transferName}, to an JPEG...`);
-//                 await FileSystem.convertToJpg(attachment.filePath, newPath);
-//             }
-//         } catch (ex: any) {
-//             failed = true;
-//             Server().log(`Failed to convert image to JPEG for attachment, ${attachment.transferName}`, "debug");
-//             Server().log(ex?.message ?? ex, "error");
-//         }
-//     } else {
-//         Server().log("Attachment has already been converted! Skipping...", "debug");
-//     }
 
-//     if (!failed && ext && (fs.existsSync(newPath) || dryRun)) {
-//         // If conversion is successful, we need to modify the attachment a bit
-//         attachment.mimeType = "image/jpeg";
-//         attachment.filePath = newPath;
-//         attachment.transferName = basename(newPath).replace(new RegExp(`\\.${ext}$`), ".jpeg");
+export const waitMs = async (ms: number) => {
+    return new Promise((resolve, _) => setTimeout(resolve, ms));
+};
 
-//         // Set the fPath to the newly converted path
-//         return newPath;
-//     }
 
-//     return null;
-// };
+// MORE FILESYSTEM STUFF
+export const parseMetadataString = (metadata: string): { [key: string]: string } => {
+    if (!metadata) return {};
 
-// export const getAttachmentMetadata = async (attachment: Attachment): Promise<Metadata> => {
-//     let metadata: Metadata;
-//     if (attachment.uti !== "com.apple.coreaudio-format" && !attachment.mimeType) return metadata;
+    const output: { [key: string]: string } = {};
+    for (const line of metadata.split("\n")) {
+        if (!line.includes("=")) continue;
 
-//     if (attachment.uti === "com.apple.coreaudio-format" || attachment.mimeType.startsWith("audio")) {
-//         metadata = await FileSystem.getAudioMetadata(attachment.filePath);
-//     } else if (attachment.mimeType.startsWith("image")) {
-//         metadata = await FileSystem.getImageMetadata(attachment.filePath);
+        const items = line.split(" = ");
+        if (items.length < 2) continue;
 
-//         // Try to get the dimentions from the attachment object iself (attribution info)
-//         const dimensions = attachment.getDimensions();
-//         if (dimensions) {
-//             metadata.height = dimensions.height;
-//             metadata.width = dimensions.width;
-//         }
+        const value = safeTrim(items[1].replace(/"/g, ""));
+        if (isEmpty(value) || value === "(") continue;
 
-//         try {
-//             // If we got no height/width data, let's try to fallback to other code to fetch it
-//             if (handledImageMimes.includes(attachment.mimeType) && (!metadata?.height || !metadata?.width)) {
-//                 Server().log("Image metadata empty, getting size from NativeImage...", "debug");
+        // If all conditions to parse pass, save the key/value pair
+        output[safeTrim(items[0])] = value;
+    }
 
-//                 // Load the image data
-//                 const image = nativeImage.createFromPath(FileSystem.getRealPath(attachment.filePath));
-
-//                 // If we were able to load the image, get the size
-//                 if (image) {
-//                     const size = image.getSize();
-
-//                     // If the size if available, set the metadata for it
-//                     if (size?.height && size?.width) {
-//                         // If the metadata is null, let's give it some data
-//                         if (metadata === null) metadata = {};
-//                         metadata.height = size.height;
-//                         metadata.width = size.width;
-//                     }
-//                 }
-//             }
-//         } catch (ex: any) {
-//             Server().log("Failed to load size data from NativeImage!", "debug");
-//         }
-//     } else if (attachment.mimeType.startsWith("video")) {
-//         metadata = await FileSystem.getVideoMetadata(attachment.filePath);
-//     }
-
-//     return metadata;
-// };
+    return output;
+};
