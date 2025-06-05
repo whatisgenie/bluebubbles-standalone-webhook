@@ -1,37 +1,41 @@
 import { randomUUID } from "crypto";
-import { DateTime } from "luxon";          // add to deps:  bun add luxon
+import { DateTime } from "luxon";          // bun add luxon
 import type { MessageResponse, ChatResponse } from "../new/types";
 import { DataSource } from "typeorm";
+
+/*****************************************************************
+ *  buildWebhookPayload  —  returns **flat** Loop webhook payload
+ *****************************************************************/
+
+const SENDER_NAME = "genie@ai.imsg.bot";
+
+const REACTION_MAP = {
+  love: "love",
+  like: "like",
+  dislike: "dislike",
+  laugh: "laugh",
+  emphasize: "exclaim",
+  question: "question"
+} as const;
 
 /* ------------------------------------------------------------- */
 /*  helpers                                                      */
 /* ------------------------------------------------------------- */
-const SENDER_NAME = "genie@ai.imsg.bot";
-
-const REACTION_MAP = {
-  love:      "love",
-  like:      "like",
-  dislike:   "dislike",
-  laugh:     "laugh",
-  emphasize: "exclaim",
-  question:  "question"
-} as const;
-
 function dlvType(svc?: string) {
   return svc?.toLowerCase() === "sms" ? "sms" : "imessage";
 }
 
 function buildGroup(chat?: ChatResponse) {
-  if (!chat || chat.style !== 43) return undefined;    // not a group iMessage
+  if (!chat || chat.style !== 43) return undefined; // not a group chat
   return {
-    group_id    : chat.guid,
-    name        : chat.displayName ?? "",
+    group_id: chat.guid,
+    name: chat.displayName ?? "",
     participants: (chat.participants ?? []).map(p => p.address)
   };
 }
 
 function buildAttachmentURL(guid: string) {
-  // 🔧 swap for your own CDN / Firebase path generator
+  // 🔧 swap for your own CDN / Firebase URL signer
   return `file:///Attachments/${guid}`;
 }
 
@@ -44,55 +48,75 @@ function detectMessageType(m: MessageResponse): string {
 }
 
 /* ============================================================= */
-/*  buildLoopPayload – v2                                         */
+/*  MAIN                                                          */
 /* ============================================================= */
-export async function buildLoopPayload(
+export async function buildWebhookPayload(
   m : MessageResponse,
-  db: DataSource
+  _db: DataSource               // kept for parity / future look-ups
 ): Promise<Record<string, any>> {
+  const alert_type = m.associatedMessageType
+    ? "message_reaction"
+    : (m.isFromMe ? "message_sent" : "message_inbound");
 
-  /* ---------- core fields used for ALL alerts ---------------- */
-  const alert_type      = m.associatedMessageType
-                            ? "message_reaction"
-                            : (m.isFromMe ? "message_sent" : "message_inbound");
-  const delivery_type   = dlvType(m.service);
-  const baseEvent: any  = {
+  /* ---------- base flattened payload ------------------------ */
+  const payload: any = {
+    _id          : randomUUID().replace(/-/g, "").slice(0, 24),
+    timestamp    : DateTime.utc().toISO(),
     alert_type,
-    delivery_type,
-    language    : { code: "en", name: "English" },          // 🛈 stub – swap in real detector if you like
-    message_id  : m.guid,
-    recipient   : m.handle?.address ?? "unknown",
-    sender_name : SENDER_NAME,
-    text        : m.text ?? undefined,
-    subject     : m.subject ?? undefined,
-    group       : buildGroup(m.chats?.[0]),
-    webhook_id  : randomUUID()
+    event_type   : alert_type,          // <— still included for convenience
+    delivery_type: dlvType(m.handle?.service),
+    language     : { code: "en", name: "English" }, // 🛈 stub; plug real detector
+
+    message_id   : m.associatedMessageGuid
+                    ? m.associatedMessageGuid.replace(/^p:\d+\//, "")
+                    : m.guid,
+    recipient    : m.handle?.address ?? "unknown",
+    sender_name  : SENDER_NAME,
+    text         : m.text ?? undefined,
+    subject      : m.subject ?? undefined,
+    webhook_id   : randomUUID(),
+
+    message_type : detectMessageType(m)
   };
 
+  /* group chat details */
+  const group = buildGroup(m.chats?.[0]);
+  if (group) payload.group = group;
+
+  /* single-chat guid handy for 1-on-1 threads */
+  if (m.chats?.[0]?.guid) payload.chatGuid = m.chats[0].guid;
+
   /* ---------- reactions -------------------------------------- */
-  if (alert_type === "message_reaction") {
-    baseEvent.message_type  = "reaction";
-    baseEvent.reaction      = REACTION_MAP[
-      m.associatedMessageType?.replace(/^-/, "") as keyof typeof REACTION_MAP
-    ] ?? "unknown";
-    baseEvent.reaction_event = m.dateRetracted ? "removed" : "placed";
+  if (payload.message_type === "reaction") {
+    const clean = m.associatedMessageType?.replace(/^-/, "") as keyof typeof REACTION_MAP;
+    payload.reaction       = REACTION_MAP[clean] ?? "unknown";
+    payload.reaction_event = m.associatedMessageType?.startsWith("-") ? "removed" : "placed";
+    if (m.threadOriginatorGuid) payload.thread_id = m.threadOriginatorGuid;
+    return payload; // early return; nothing else needed
   }
 
   /* ---------- normal messages -------------------------------- */
-  else {
-    baseEvent.message_type = detectMessageType(m);
-    if (m.attachments?.length) {
-      baseEvent.attachments = m.attachments.map(a => buildAttachmentURL(a.guid));
-    }
-    if (m.threadOriginatorGuid) baseEvent.thread_id = m.threadOriginatorGuid;
-    if (alert_type === "message_sent") baseEvent.success = true;
+  if (m.attachments?.length) {
+    payload.attachments = m.attachments.map(a => buildAttachmentURL(a.guid));
   }
+  if (m.threadOriginatorGuid) payload.thread_id = m.threadOriginatorGuid;
+  if (alert_type === "message_sent") payload.success = true;
 
-  /* ---------- wrap in { _id, timestamp, event, event_type } --- */
-  return {
-    _id        : randomUUID().replace(/-/g, "").slice(0, 24),   // 24-char mongo-style id
-    timestamp  : DateTime.utc().toISO(),
-    event      : baseEvent,
-    event_type : alert_type
-  };
+  return payload;
 }
+
+
+export function postWebhook(webhookPayload: Record<string, any>, webhookUrl: string): void {
+    fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(webhookPayload),
+    }).then((response) => {
+      console.log('Webhook posted successfully.');
+    }).catch((error: any) => {
+      console.error(`Error posting webhook: ${error.message}`);
+    });
+  }
+  

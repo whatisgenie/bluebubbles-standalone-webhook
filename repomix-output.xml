@@ -2905,7 +2905,7 @@ function detectMessageType(m: MessageResponse) {
 /**
  * Build webhook payload for *one* serialized Message.
  */
-export async function buildLoopPayload(
+export async function buildWebhookPayload(
   m: MessageResponse,
   db: DataSource
 ): Promise<Record<string, any>> {
@@ -3202,7 +3202,7 @@ import { MessageSerializer } from './new/serializers/MessageSerializer'; // Assu
 // For this script to fully work, those would need to be present too.
 // We will make serializer configs minimal to reduce deep dependencies for this example.
 import { DEFAULT_ATTACHMENT_CONFIG, DEFAULT_MESSAGE_CONFIG } from './new/serializers/constants';
-import { buildLoopPayload } from "./webhook";
+import { buildWebhookPayload } from "./webhook";
 import type { MessageResponse } from "./new/types";
 
 // --- END OF ASSUMED COPIED/IMPORTED FILES ---
@@ -3366,7 +3366,7 @@ async function pollForNewMessages(lastPollTime: Date): Promise<Date> {
                     isForNotification: false // Get full details
                 });
 
-                const payload = await buildLoopPayload(serializedMsg, dataSource);
+                const payload = await buildWebhookPayload(serializedMsg, dataSource);
                 console.log({payload: JSON.stringify(payload, null, 2)});
 
                 // prettyPrintMessage(serializedMsg, dataSource);

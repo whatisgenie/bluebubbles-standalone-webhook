@@ -1,4 +1,5 @@
 import "reflect-metadata";
+import "dotenv/config";
 
 // ────────────────────────────────────────────────────────────────────────────────
 //  iMessage → webhook poll‑loop (duplicate‑safe, race‑safe)
@@ -14,8 +15,10 @@ import { convertDateTo2001Time } from "./new/helpers/dateUtils";
 import { MessageSerializer }     from "./new/serializers/MessageSerializer";
 import { DEFAULT_ATTACHMENT_CONFIG,
          DEFAULT_MESSAGE_CONFIG  } from "./new/serializers/constants";
-import { buildLoopPayload }       from "./webhook";
+import { buildWebhookPayload, postWebhook }       from "./webhook";
 import type { MessageResponse }   from "./new/types";
+
+const WEBHOOK_URL = process.env.WEBHOOK_URL ?? "";
 
 // ────────────────────────────────────────────────────────────────────────────────
 //  Config
@@ -107,8 +110,9 @@ async function pollForNewMessages(lastSeen: Date): Promise<Date> {
           isForNotification:false,
         });
 
-        const payload = await buildLoopPayload(serial, dataSource!);
-        console.log({ payload });
+        const payload = await buildWebhookPayload(serial, dataSource!);
+        console.log({ payload: JSON.stringify(payload, null, 2) });
+        postWebhook(payload, WEBHOOK_URL);
       } catch (e: any) {
         console.error(`Error serializing ${msg.guid}:`, e.message);
       }
