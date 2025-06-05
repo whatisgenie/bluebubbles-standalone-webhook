@@ -1,7 +1,7 @@
-import { randomUUID } from "crypto";
-import { DateTime }   from "luxon";
+import { randomUUID }   from "crypto";
+import { DateTime }     from "luxon";
 import type { MessageResponse, ChatResponse } from "../new/types";
-import { DataSource } from "typeorm";
+import { DataSource }   from "typeorm";
 
 /*****************************************************************
  * buildWebhookPayload — returns one **flat** Loop webhook payload
@@ -18,7 +18,7 @@ const REACTION_MAP = {
   question:  "question"
 } as const;
 
-/* ───────────────────────── helpers ─────────────────────────── */
+/* ───────────── helpers ───────────── */
 
 const dlvType = (svc?: string) =>
   svc?.toLowerCase() === "sms" ? "sms" : "imessage";
@@ -44,28 +44,36 @@ const msgType = (m: MessageResponse): string => {
   return "text";
 };
 
-/* inline helper: decide if this was edited or unsent */
+/* decide if this message was edited or unsent — “unsent” wins */
 const updInfo = (m: MessageResponse) => {
-  if (m.dateRetracted) {
+  const isUnsent =
+    !!m.dateRetracted ||                       // Sonoma & forward
+    (m.partCount === 0 && !!m.dateEdited);     // Ventura/Monterey fallback
+
+  if (isUnsent) {
     return {
       update_event: "unsent" as const,
-      update_at   : DateTime.fromMillis(m.dateRetracted).toISO()
+      update_at   : DateTime.fromMillis(
+                      (m.dateRetracted ?? m.dateEdited)!
+                    ).toISO()
     };
   }
+
   if (m.dateEdited) {
     return {
       update_event: "edited" as const,
       update_at   : DateTime.fromMillis(m.dateEdited).toISO()
     };
   }
+
   return {};
 };
 
-/* ────────────────────────── main ───────────────────────────── */
+/* ───────────── main ───────────── */
 
 export async function buildWebhookPayload(
   m : MessageResponse,
-  _db: DataSource            // kept for parity / future look-ups
+  _db: DataSource              // kept for parity / future look-ups
 ): Promise<Record<string, any>> {
 
   const alert_type =
@@ -73,14 +81,14 @@ export async function buildWebhookPayload(
       ? "message_reaction"
       : (m.isFromMe ? "message_sent" : "message_inbound");
 
-  /* core flat structure */
+  /* ── core flat structure ── */
   const payload: any = {
     _id          : randomUUID().replace(/-/g, "").slice(0, 24),
-    timestamp    : DateTime.utc().toISO(),       // when we generated the webhook
+    timestamp    : DateTime.utc().toISO(),   // when we generated the webhook
     alert_type,
-    event_type   : alert_type,                   // kept for backward-compat
+    event_type   : alert_type,               // kept for convenience
     delivery_type: dlvType(m.handle?.service),
-    language     : { code:"en", name:"English" },// 🛈 stub – plug detector if needed
+    language     : { code:"en", name:"English" }, // 🛈 stub – plug detector if needed
 
     message_id   : m.guid,
     recipient    : m.handle?.address ?? "unknown",
@@ -99,25 +107,23 @@ export async function buildWebhookPayload(
   /* group chat extra block */
   const grp = buildGroup(m.chats?.[0]);
   if (grp) {
-    payload.group  = grp;
+    payload.group   = grp;
     payload.isGroup = true;
   }
 
-  /* single-chat guid handy for DM threads */
+  /* single-chat guid handy for DMs */
   if (m.chats?.[0]?.guid) payload.chatGuid = m.chats[0].guid;
 
-  /* ── reactions ────────────────────────────────────────────── */
+  /* ── reactions ── */
   if (payload.message_type === "reaction") {
     const clean = m.associatedMessageType!.replace(/^-/, "") as keyof typeof REACTION_MAP;
     payload.reaction       = REACTION_MAP[clean] ?? "unknown";
     payload.reaction_event = m.associatedMessageType!.startsWith("-") ? "removed" : "placed";
     if (m.threadOriginatorGuid) payload.thread_id = m.threadOriginatorGuid;
-
-    /* edits / unsends do not apply to tap-backs */
-    return payload;
+    return payload;                      // edits / unsends don’t apply to tap-backs
   }
 
-  /* ── normal messages ──────────────────────────────────────── */
+  /* ── normal messages ── */
   if (m.attachments?.length) {
     payload.attachments = m.attachments.map(a => buildAttachmentURL(a.guid));
   }
@@ -126,16 +132,16 @@ export async function buildWebhookPayload(
     payload.isReply   = true;
   }
 
-  /* mark success for outbound messages (optional but handy) */
+  /* mark success for outbound messages */
   if (alert_type === "message_sent") payload.success = true;
 
-  /* add edited / unsent info if present */
+  /* attach edited / unsent metadata */
   Object.assign(payload, updInfo(m));
 
   return payload;
 }
 
-/* very thin wrapper around `fetch` so caller can keep their code unchanged */
+/* thin wrapper around fetch so caller code stays the same */
 export function postWebhook(
   body: Record<string, any>,
   url : string
