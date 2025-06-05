@@ -79,6 +79,7 @@ export async function buildWebhookPayload(
     message_type : detectMessageType(m),
 
     isGroup: false,
+    isReply: false,
   };
 
   /* group chat details */
@@ -104,7 +105,11 @@ export async function buildWebhookPayload(
   if (m.attachments?.length) {
     payload.attachments = m.attachments.map(a => buildAttachmentURL(a.guid));
   }
-  if (m.threadOriginatorGuid) payload.thread_id = m.threadOriginatorGuid;
+  if (m.threadOriginatorGuid) {
+    payload.thread_id = m.threadOriginatorGuid;
+    payload.isReply = true;
+  }
+  
   if (alert_type === "message_sent") payload.success = true;
 
   return payload;
