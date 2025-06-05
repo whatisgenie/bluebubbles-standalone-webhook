@@ -76,12 +76,17 @@ export async function buildWebhookPayload(
     subject      : m.subject ?? undefined,
     webhook_id   : randomUUID(),
 
-    message_type : detectMessageType(m)
+    message_type : detectMessageType(m),
+
+    isGroup: false,
   };
 
   /* group chat details */
   const group = buildGroup(m.chats?.[0]);
-  if (group) payload.group = group;
+  if (group) {
+    payload.group = group;
+    payload.isGroup = true;
+  }
 
   /* single-chat guid handy for 1-on-1 threads */
   if (m.chats?.[0]?.guid) payload.chatGuid = m.chats[0].guid;
