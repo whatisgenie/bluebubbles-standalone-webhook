@@ -12,6 +12,7 @@ export async function ensureRegistration(): Promise<DeviceDoc> {
   const deviceId  = getDeviceId();
   const coll      = db.collection<DeviceDoc>("device_config");
 
+
   const update = { $setOnInsert: { webhooks: [] as string[] } };
   await coll.updateOne({ deviceId }, update, { upsert: true });
 

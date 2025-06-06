@@ -36,26 +36,26 @@ export async function createWebhookLog(
   
     /* ② ensure a unique index once (no-op if already present) */
     await c.createIndex({ webhookId: 1 }, { unique: true });
+    await c.createIndex({ status: 1, updatedAt: -1 });   
   
     try {
       await c.insertOne({
-        webhookId,
-        messageId : payload.message_id ?? "",
-        deviceId,
-        urls,
-        delivered : 0,
-        attempts  : 0,
-        status    : "pending",
-        payload,
-        createdAt : new Date(),
-        updatedAt : new Date()
-      });
-  
-      return true;                    // inserted → not a dup
-    } catch (e: any) {
-      if (e.code === 11000) return false;   // duplicate-key
-      throw e;                        // some other DB error
-    }
+          webhookId,
+          messageId : payload.message_id ?? "",
+          deviceId,
+          urls,
+          delivered : 0,
+          attempts  : 0,
+          status    : "pending",
+          payload,
+          createdAt : new Date(),
+          updatedAt : new Date()
+        });
+        return true;            // row was written
+      } catch (e: any) {
+        if (e.code === 11000) return false;   // duplicate key → somebody beat us to it
+        throw e;                              // other errors bubble up
+      }
   }
 
 /* ------------------------------------------------------------------ */

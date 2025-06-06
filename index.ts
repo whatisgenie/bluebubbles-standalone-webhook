@@ -154,7 +154,7 @@ async function pollForNewMessages(lastSeen: Date): Promise<Date> {
         }
 
         await enqueue(queuePayload);                // only if fresh
-        console.log("Posted payload to queue.");
+        console.log("Queued payload → RabbitMQ");
       } catch (e: any) {
         console.error(`Error serializing ${msg.guid}:`, e.message);
       }
