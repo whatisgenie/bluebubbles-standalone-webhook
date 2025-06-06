@@ -43,11 +43,12 @@ The content is organized as follows:
 infrastructure/
   mongo/
     registration.ts
+    webhookLog.ts
   mq/
     publisher.ts
-    worker.ts
   system/
     deviceId.ts
+  id.ts
 new/
   entities/
     Attachment.ts
@@ -91,11 +92,112 @@ types.ts
 <files>
 This section contains the contents of the repository's files.
 
+<file path="infrastructure/mongo/webhookLog.ts">
+import { getDb } from "./client";
+
+export type WebhookStatus = "pending" | "delivering" | "success" | "failed" | "duplicate";
+
+export type WebhookLogDoc = {
+  webhookId : string;                // payload.webhook_id (UUID)
+  messageId : string;                // payload.message_id / msg.guid
+  urls      : string[];              // fan-out targets
+  delivered : number;                // # urls successfully POSTed
+  attempts  : number;                // total POST attempts (all urls)
+  status    : WebhookStatus;
+  payload   : any;                   // full Loop payload – optional but handy
+  lastError?: string;                // most-recent error (if any)
+  createdAt : Date;
+  updatedAt : Date;
+};
+
+/* helper to obtain the collection */
+async function col() {
+  const db  = await getDb();
+  return db.collection<WebhookLogDoc>("webhook_log");
+}
+
+/* ------------------------------------------------------------------ */
+/* producer (index.ts) calls this once – before publishing to Rabbit  */
+/* ------------------------------------------------------------------ */
+// / infrastructure/mongo/webhookLog.ts
+export async function createWebhookLog(
+    webhookId : string,
+    payload   : any,
+    urls      : string[]
+  ) {
+    const c = await col();
+  
+    /* ② ensure a unique index once (no-op if already present) */
+    await c.createIndex({ webhookId: 1 }, { unique: true });
+  
+    try {
+      await c.insertOne({
+        webhookId,
+        messageId : payload.message_id ?? "",
+        urls,
+        delivered : 0,
+        attempts  : 0,
+        status    : "pending",
+        payload,
+        createdAt : new Date(),
+        updatedAt : new Date()
+      });
+  
+      return true;                    // inserted → not a dup
+    } catch (e: any) {
+      if (e.code === 11000) return false;   // duplicate-key
+      throw e;                        // some other DB error
+    }
+  }
+
+/* ------------------------------------------------------------------ */
+/* worker updates                                                     */
+/* ------------------------------------------------------------------ */
+export async function markDuplicate(id: string) {
+  (await col()).updateOne(
+    { webhookId: id },
+    { $set: { status: "duplicate", updatedAt: new Date() } }
+  );
+}
+
+export async function markAttempt(id: string, ok: boolean, err?: string) {
+  (await col()).updateOne(
+    { webhookId: id },
+    {
+      $inc : { attempts: 1, delivered: ok ? 1 : 0 },
+      $set : {
+        status    : ok ? "delivering" : "failed",
+        lastError : err,
+        updatedAt : new Date()
+      }
+    }
+  );
+}
+
+export async function markSuccess(id: string) {
+  (await col()).updateOne(
+    { webhookId: id },
+    { $set: { status: "success", updatedAt: new Date() } }
+  );
+}
+</file>
+
+<file path="infrastructure/id.ts">
+// infrastructure/id.ts
+import { v5 as uuidv5 } from "uuid";
+
+const NAMESPACE = "8d6251b3-e47a-4dbc-b063-4025e3cd69fa"; // random, but fixed
+
+export function makeWebhookId(msgId: string, alertType: string) {
+  return uuidv5(`${msgId}:${alertType}`, NAMESPACE);
+}
+</file>
+
 <file path="infrastructure/mongo/registration.ts">
 import { getDb } from "./client";
 import { getDeviceId } from "../system/deviceId";
 
-type DeviceDoc = {
+export type DeviceDoc = {
   deviceId: string;
   webhooks: string[];           // array of URLs
 };
@@ -130,10 +232,13 @@ export async function addWebhook(url: string) {
 <file path="infrastructure/mq/publisher.ts">
 import { getChannel } from "./connection";
 
+// infrastructure/mq/publisher.ts
 export type DispatchJob = {
-  payload: any;      // Loop webhook payload
-  urls: string[];    // destination URLs
-};
+    webhookId : string;   // ⬅️ new
+    messageId : string;
+    payload   : any;
+    urls      : string[];
+  };
 
 /** Push one job onto the fan-out exchange. */
 export async function enqueue(job: DispatchJob) {
@@ -148,69 +253,6 @@ export async function enqueue(job: DispatchJob) {
     }
   );
 }
-</file>
-
-<file path="infrastructure/mq/worker.ts">
-import fetch from "node-fetch";
-import { getChannel } from "./connection";
-
-(async () => {
-  const ch = await getChannel();
-
-  const MAIN_Q  = "webhook.dispatch.q";
-  const RETRIES = [
-    "webhook.dispatch.retry.1",   // attempt 1  →   5 s delay
-    "webhook.dispatch.retry.2",   // attempt 2  →  10 s delay
-    "webhook.dispatch.retry.3"    // attempt 3  →  20 s delay
-  ];
-
-  ch.consume(MAIN_Q, async msg => {
-    if (!msg) return;              // consumer cancelled
-
-    const attempts = Number(msg.properties.headers?.attempts || 0);
-
-    try {
-      const job = JSON.parse(msg.content.toString()) as {
-        payload: any;
-        urls   : string[];
-      };
-
-      // POST to every endpoint sequentially (simple & safe)
-      for (const url of job.urls) {
-        const res = await fetch(url, {
-          method : "POST",
-          headers: { "Content-Type": "application/json" },
-          body   : JSON.stringify(job.payload)
-        });
-        if (!res.ok) throw new Error(`POST ${url} => ${res.status}`);
-      }
-
-      console.log(`✅ delivered (attempt ${attempts})`);
-      ch.ack(msg);
-
-    } catch (err) {
-      console.error(`❌ attempt ${attempts} failed:`, (err as any).message);
-
-      if (attempts >= 3) {         // abandon after 3 retries
-        ch.ack(msg);
-        return;
-      }
-
-      // re-queue into the next retry queue
-      ch.sendToQueue(
-        RETRIES[attempts],         // 0→retry.1, 1→retry.2, 2→retry.3
-        msg.content,
-        {
-          persistent: true,
-          headers: { attempts: attempts + 1 }
-        }
-      );
-      ch.ack(msg);
-    }
-  });
-
-  console.log("🚚  worker ready – listening for jobs");
-})();
 </file>
 
 <file path="infrastructure/system/deviceId.ts">
@@ -233,19 +275,6 @@ export function getDeviceId(): string {
   fs.writeFileSync(cache, id);
   return id;
 }
-</file>
-
-<file path="scripts/add-webhook.ts">
-/* Usage:  npx tsx scripts/add-webhook.ts https://hook.site/123 */
-import { addWebhook } from "../infrastructure/mongo/registration";
-
-const url = process.argv[2];
-if (!url) {
-  console.error("Usage: add-webhook.ts <url>");
-  process.exit(1);
-}
-
-addWebhook(url).then(() => process.exit(0));
 </file>
 
 <file path="new/entities/Attachment.ts">
@@ -1187,187 +1216,6 @@ export class Message {
 }
 </file>
 
-<file path="new/fileSystem/index.ts">
-import * as path from "path";
-import * as child_process from "child_process";
-
-import {
-    parseMetadataString,
-    isNotEmpty,
-    isEmpty,
-} from "../helpers/utils";
-
-import {
-    type AudioMetadata,
-    type MetadataKeyMap,
-    type VideoMetadata,
-    type ImageMetadata,
-    AudioMetadataKeys,
-    MetadataDataTypes,
-    VideoMetadataKeys,
-    ImageMetadataKeys
-} from "./types";
-
-/**
- * The class used to handle all communications to the App's "filesystem".
- * The filesystem is the directory dedicated to the app-specific files
- */
-export class FileSystem {
-    public static baseDir = path.join(app.getPath("userData"), subdir);
-
-    public static convertDir = path.join(FileSystem.baseDir, "Convert");
-
-    /**
-     * Asynchronously executes a shell command
-     */
-    static async execShellCommand(cmd: string): Promise<string> {
-        const { exec } = child_process;
-        return new Promise((resolve, reject) => {
-            exec(cmd, (error, stdout, stderr) => {
-                if (error) {
-                    reject(error);
-                }
-
-                resolve(stdout || stderr);
-            });
-        });
-    }
-
-
-    static getRealPath(filePath: string) {
-        let output = filePath;
-        if (isEmpty(output)) return output;
-
-        if (output[0] === "~") {
-            output = path.join(process.env.HOME, output.slice(1));
-        }
-
-        return output;
-    }
-
-    static async convertCafToMp3(originalPath: string, outputPath: string): Promise<void> {
-        const oldPath = FileSystem.getRealPath(originalPath);
-        const output = await FileSystem.execShellCommand(
-            `/usr/bin/afconvert -f m4af -d aac "${oldPath}" "${outputPath}"`
-        );
-        if (isNotEmpty(output) && output.includes("Error:")) {
-            throw Error(`Failed to convert audio to MP3: ${output}`);
-        }
-    }
-
-    static async convertMp3ToCaf(originalPath: string, outputPath: string): Promise<void> {
-        const oldPath = FileSystem.getRealPath(originalPath);
-        const output = await FileSystem.execShellCommand(
-            `/usr/bin/afconvert -f caff -d LEI16@44100 -c 1 "${oldPath}" "${outputPath}"`
-        );
-        if (isNotEmpty(output) && output.includes("Error:")) {
-            throw Error(`Failed to convert audio to CAF: ${output}`);
-        }
-    }
-
-    static async convertToJpg(originalPath: string, outputPath: string): Promise<void> {
-        const oldPath = FileSystem.getRealPath(originalPath);
-        const output = await FileSystem.execShellCommand(
-            `/usr/bin/sips --setProperty "format" "jpeg" "${oldPath}" --out "${outputPath}"`
-        );
-        if (isNotEmpty(output) && output.includes("Error:")) {
-            throw Error(`Failed to convert image to JPEG: ${output}`);
-        }
-    }
-
-    static async isSipDisabled(): Promise<boolean> {
-        const res = ((await FileSystem.execShellCommand(`csrutil status`)) ?? "").trim();
-        return !res.endsWith("enabled.");
-    }
-
-    static async hasFullDiskAccess(): Promise<boolean> {
-        const res = (
-            (await FileSystem.execShellCommand(
-                `defaults read ~/Library/Preferences/com.apple.universalaccessAuthWarning.plist`
-            )) ?? ""
-        ).trim();
-        return res.includes('BlueBubbles.app" = 1') || res.includes('BlueBubbles" = 1');
-    }
-
-    static async getFileMetadata(filePath: string): Promise<{ [key: string]: string }> {
-        try {
-            return parseMetadataString(await FileSystem.execShellCommand(`mdls "${FileSystem.getRealPath(filePath)}"`));
-        } catch (ex: any) {
-            return null;
-        }
-    }
-
-    private static async parseMetadata(filePath: string, parserKeyDefinition: MetadataKeyMap): Promise<any> {
-        const metadata: { [key: string]: string } = await FileSystem.getFileMetadata(filePath);
-        if (!metadata) return null;
-
-        const getNumber = (num: string) => {
-            if (!num) return null;
-
-            try {
-                return Number.parseFloat(num);
-            } catch (ex: any) {
-                return null;
-            }
-        };
-
-        const meta: { [key: string]: any } = {};
-        for (const [key, value] of Object.entries(metadata)) {
-            if (!(key in parserKeyDefinition)) continue;
-
-            // Get the types info for the field
-            const { dataType, metaKey } = parserKeyDefinition[key];
-
-            // Parse the item by type
-            let itemValue: any;
-            switch (dataType) {
-                case MetadataDataTypes.Bool:
-                    itemValue = value === "1";
-                    break;
-                case MetadataDataTypes.Float:
-                    itemValue = getNumber(value);
-                    break;
-                case MetadataDataTypes.Int:
-                    itemValue = Math.trunc(getNumber(value));
-                    break;
-                default:
-                    itemValue = value;
-                    break;
-            }
-
-            meta[metaKey] = itemValue;
-        }
-
-        return meta;
-    }
-
-    static async getAudioMetadata(audioPath: string): Promise<AudioMetadata> {
-        const meta = await FileSystem.parseMetadata(audioPath, AudioMetadataKeys);
-        return meta as AudioMetadata;
-    }
-
-    static async getVideoMetadata(videoPath: string): Promise<VideoMetadata> {
-        const meta = await FileSystem.parseMetadata(videoPath, VideoMetadataKeys);
-        return meta as VideoMetadata;
-    }
-
-    static async getImageMetadata(imagePath: string): Promise<ImageMetadata> {
-        const meta = await FileSystem.parseMetadata(imagePath, ImageMetadataKeys);
-        return meta as ImageMetadata;
-    }
-
-
-
-
-
-
-
-
-
-
-}
-</file>
-
 <file path="new/fileSystem/types.ts">
 export enum MetadataDataTypes {
     String = 0,
@@ -2272,6 +2120,19 @@ export enum ProgressStatus {
 }
 </file>
 
+<file path="scripts/add-webhook.ts">
+/* Usage:  npx tsx scripts/add-webhook.ts https://hook.site/123 */
+import { addWebhook } from "../infrastructure/mongo/registration";
+
+const url = process.argv[2];
+if (!url) {
+  console.error("Usage: add-webhook.ts <url>");
+  process.exit(1);
+}
+
+addWebhook(url).then(() => process.exit(0));
+</file>
+
 <file path=".env.example">
 WEBHOOK_URL="<YOUR_WEBHOOK_URL>"
 </file>
@@ -2679,6 +2540,187 @@ export enum ProgressStatus {
     IN_PROGRESS = "IN_PROGRESS",
     COMPLETED = "COMPLETED",
     FAILED = "FAILED"
+}
+</file>
+
+<file path="new/fileSystem/index.ts">
+import * as path from "path";
+import * as child_process from "child_process";
+
+import {
+    parseMetadataString,
+    isNotEmpty,
+    isEmpty,
+} from "../helpers/utils";
+
+import {
+    type AudioMetadata,
+    type MetadataKeyMap,
+    type VideoMetadata,
+    type ImageMetadata,
+    AudioMetadataKeys,
+    MetadataDataTypes,
+    VideoMetadataKeys,
+    ImageMetadataKeys
+} from "./types";
+
+/**
+ * The class used to handle all communications to the App's "filesystem".
+ * The filesystem is the directory dedicated to the app-specific files
+ */
+export class FileSystem {
+    public static baseDir = path.join(process.env.HOME, "Library/Application Support", "imsg-bot");
+
+    public static convertDir = path.join(FileSystem.baseDir, "Convert");
+
+    /**
+     * Asynchronously executes a shell command
+     */
+    static async execShellCommand(cmd: string): Promise<string> {
+        const { exec } = child_process;
+        return new Promise((resolve, reject) => {
+            exec(cmd, (error, stdout, stderr) => {
+                if (error) {
+                    reject(error);
+                }
+
+                resolve(stdout || stderr);
+            });
+        });
+    }
+
+
+    static getRealPath(filePath: string) {
+        let output = filePath;
+        if (isEmpty(output)) return output;
+
+        if (output[0] === "~") {
+            output = path.join(process.env.HOME, output.slice(1));
+        }
+
+        return output;
+    }
+
+    static async convertCafToMp3(originalPath: string, outputPath: string): Promise<void> {
+        const oldPath = FileSystem.getRealPath(originalPath);
+        const output = await FileSystem.execShellCommand(
+            `/usr/bin/afconvert -f m4af -d aac "${oldPath}" "${outputPath}"`
+        );
+        if (isNotEmpty(output) && output.includes("Error:")) {
+            throw Error(`Failed to convert audio to MP3: ${output}`);
+        }
+    }
+
+    static async convertMp3ToCaf(originalPath: string, outputPath: string): Promise<void> {
+        const oldPath = FileSystem.getRealPath(originalPath);
+        const output = await FileSystem.execShellCommand(
+            `/usr/bin/afconvert -f caff -d LEI16@44100 -c 1 "${oldPath}" "${outputPath}"`
+        );
+        if (isNotEmpty(output) && output.includes("Error:")) {
+            throw Error(`Failed to convert audio to CAF: ${output}`);
+        }
+    }
+
+    static async convertToJpg(originalPath: string, outputPath: string): Promise<void> {
+        const oldPath = FileSystem.getRealPath(originalPath);
+        const output = await FileSystem.execShellCommand(
+            `/usr/bin/sips --setProperty "format" "jpeg" "${oldPath}" --out "${outputPath}"`
+        );
+        if (isNotEmpty(output) && output.includes("Error:")) {
+            throw Error(`Failed to convert image to JPEG: ${output}`);
+        }
+    }
+
+    static async isSipDisabled(): Promise<boolean> {
+        const res = ((await FileSystem.execShellCommand(`csrutil status`)) ?? "").trim();
+        return !res.endsWith("enabled.");
+    }
+
+    static async hasFullDiskAccess(): Promise<boolean> {
+        const res = (
+            (await FileSystem.execShellCommand(
+                `defaults read ~/Library/Preferences/com.apple.universalaccessAuthWarning.plist`
+            )) ?? ""
+        ).trim();
+        return res.includes('BlueBubbles.app" = 1') || res.includes('BlueBubbles" = 1');
+    }
+
+    static async getFileMetadata(filePath: string): Promise<{ [key: string]: string }> {
+        try {
+            return parseMetadataString(await FileSystem.execShellCommand(`mdls "${FileSystem.getRealPath(filePath)}"`));
+        } catch (ex: any) {
+            return null;
+        }
+    }
+
+    private static async parseMetadata(filePath: string, parserKeyDefinition: MetadataKeyMap): Promise<any> {
+        const metadata: { [key: string]: string } = await FileSystem.getFileMetadata(filePath);
+        if (!metadata) return null;
+
+        const getNumber = (num: string) => {
+            if (!num) return null;
+
+            try {
+                return Number.parseFloat(num);
+            } catch (ex: any) {
+                return null;
+            }
+        };
+
+        const meta: { [key: string]: any } = {};
+        for (const [key, value] of Object.entries(metadata)) {
+            if (!(key in parserKeyDefinition)) continue;
+
+            // Get the types info for the field
+            const { dataType, metaKey } = parserKeyDefinition[key];
+
+            // Parse the item by type
+            let itemValue: any;
+            switch (dataType) {
+                case MetadataDataTypes.Bool:
+                    itemValue = value === "1";
+                    break;
+                case MetadataDataTypes.Float:
+                    itemValue = getNumber(value);
+                    break;
+                case MetadataDataTypes.Int:
+                    itemValue = Math.trunc(getNumber(value));
+                    break;
+                default:
+                    itemValue = value;
+                    break;
+            }
+
+            meta[metaKey] = itemValue;
+        }
+
+        return meta;
+    }
+
+    static async getAudioMetadata(audioPath: string): Promise<AudioMetadata> {
+        const meta = await FileSystem.parseMetadata(audioPath, AudioMetadataKeys);
+        return meta as AudioMetadata;
+    }
+
+    static async getVideoMetadata(videoPath: string): Promise<VideoMetadata> {
+        const meta = await FileSystem.parseMetadata(videoPath, VideoMetadataKeys);
+        return meta as VideoMetadata;
+    }
+
+    static async getImageMetadata(imagePath: string): Promise<ImageMetadata> {
+        const meta = await FileSystem.parseMetadata(imagePath, ImageMetadataKeys);
+        return meta as ImageMetadata;
+    }
+
+
+
+
+
+
+
+
+
+
 }
 </file>
 
@@ -3755,192 +3797,7 @@ function prettyPrintMessage(m: MessageResponse, db: DataSource) {
 }
 </file>
 
-<file path="index.ts">
-import "reflect-metadata";
-import "dotenv/config";
-
-// ────────────────────────────────────────────────────────────────────────────────
-//  iMessage → webhook poll‑loop (duplicate‑safe, race‑safe)
-// ────────────────────────────────────────────────────────────────────────────────
-import { DataSource, Brackets } from "typeorm";
-
-import { Message }     from "./new/entities/Message";
-import { Handle }      from "./new/entities/Handle";
-import { Chat }        from "./new/entities/Chat";
-import { Attachment }  from "./new/entities/Attachment";
-
-import { convertDateTo2001Time } from "./new/helpers/dateUtils";
-import { MessageSerializer }     from "./new/serializers/MessageSerializer";
-import { DEFAULT_ATTACHMENT_CONFIG,
-         DEFAULT_MESSAGE_CONFIG  } from "./new/serializers/constants";
-import { buildWebhookPayload, postWebhook }       from "./webhook";
-import type { MessageResponse }   from "./new/types";
-
-const WEBHOOK_URL = process.env.WEBHOOK_URL ?? "";
-
-// ────────────────────────────────────────────────────────────────────────────────
-//  Config
-// ────────────────────────────────────────────────────────────────────────────────
-const DB_PATH = `${process.env.HOME}/Library/Messages/chat.db`;
-let   dataSource: DataSource | null = null;
-
-const SCRIPT_MESSAGE_SERIALIZER_CONFIG = {
-  ...DEFAULT_MESSAGE_CONFIG,
-  loadChatParticipants: false,
-  includeChats:         true,
-  enforceMaxSize:       false,
-  parseAttributedBody:  true,
-  parseMessageSummary:  true,
-  parsePayloadData:     false,
-} as const;
-
-const SCRIPT_ATTACHMENT_SERIALIZER_CONFIG = {
-  ...DEFAULT_ATTACHMENT_CONFIG,
-  loadData:     false,
-  loadMetadata: true,
-} as const;
-
-// ────────────────────────────────────────────────────────────────────────────────
-//  DB bootstrap
-// ────────────────────────────────────────────────────────────────────────────────
-async function initializeDatabase(): Promise<boolean> {
-  try {
-    dataSource = new DataSource({
-      name:     "iMessageMinimalScript",
-      type:     "better-sqlite3",
-      database: DB_PATH,
-      entities: [Message, Handle, Chat, Attachment],
-      // logging: ["query", "error"],
-    });
-    await dataSource.initialize();
-    console.log("Successfully connected to iMessage database.");
-    return true;
-  } catch (err: any) {
-    console.error(`Failed to connect to iMessage database at ${DB_PATH}:`, err.message);
-    console.error("Give the terminal Full‑Disk‑Access and try again.");
-    dataSource = null;
-    return false;
-  }
-}
-
-// ────────────────────────────────────────────────────────────────────────────────
-//  Query helpers (single source of truth)
-// ────────────────────────────────────────────────────────────────────────────────
-async function getAllMessages(after: Date): Promise<Message[]> {
-  if (!dataSource?.isInitialized) return [];
-
-  const query = dataSource
-    .getRepository(Message)
-    .createQueryBuilder("message")
-    .leftJoinAndSelect("message.handle",      "handle")
-    .leftJoinAndSelect("message.attachments", "attachment")
-    .innerJoinAndSelect("message.chats",      "chat")
-    .leftJoinAndSelect("chat.participants",   "chatParticipants")
-    .andWhere(new Brackets(qb => {
-      qb.where("message.date        > :cut", { cut: convertDateTo2001Time(after) })
-        .orWhere("message.date_edited > :cut", { cut: convertDateTo2001Time(after) });
-    }))
-    .orderBy("message.date", "ASC")
-    .limit(500); // safety cap
-
-  return query.getMany();
-}
-
-// ────────────────────────────────────────────────────────────────────────────────
-//  Poll loop
-// ────────────────────────────────────────────────────────────────────────────────
-async function pollForNewMessages(lastSeen: Date): Promise<Date> {
-  if (!dataSource) return lastSeen;
-
-//   console.log(`[${new Date().toISOString()}] Checking for new messages since ${lastSeen.toISOString()}`);
-
-  const rows = await getAllMessages(lastSeen);
-
-  if (rows.length) {
-    console.log(`Found ${rows.length} new/updated incoming message(s):`);
-
-    for (const msg of rows) {
-      try {
-        const serial = await MessageSerializer.serialize({
-          message:          msg,
-          config:           SCRIPT_MESSAGE_SERIALIZER_CONFIG,
-          attachmentConfig: SCRIPT_ATTACHMENT_SERIALIZER_CONFIG,
-          isForNotification:false,
-        });
-
-        const payload = await buildWebhookPayload(serial, dataSource!);
-        console.log({ payload: JSON.stringify(payload, null, 2) });
-        postWebhook(payload, WEBHOOK_URL);
-      } catch (e: any) {
-        console.error(`Error serializing ${msg.guid}:`, e.message);
-      }
-    }
-    console.log("  ───────────────────────────────────────────");
-  } else {
-    // console.log("No new messages found.");
-  }
-
-  // advance cursor (exclusive) — pick the newest lastUpdateTime
-  const newest = rows.reduce<Date>(
-    (max, m) => new Date(Math.max(max.getTime(), m.lastUpdateTime.getTime())),
-    lastSeen,
-  );
-  return new Date(newest.getTime() + 1); // +1 ms avoids duplicates
-}
-
-// ────────────────────────────────────────────────────────────────────────────────
-//  Runner
-// ────────────────────────────────────────────────────────────────────────────────
-async function run() {
-  if (!await initializeDatabase()) return;
-
-  let lastCursor = new Date(Date.now() - 5 * 60_000); // 5‑min backfill
-
-  // race‑safe polling wrapper
-  let inFlight = false;
-  const safePoll = async () => {
-    if (inFlight) return;
-    inFlight = true;
-    lastCursor = await pollForNewMessages(lastCursor);
-    inFlight  = false;
-  };
-
-  await safePoll();              // first run immediately
-  setInterval(safePoll, 2_000);  // then every 2 s
-
-  process.on("SIGINT", async () => {
-    console.log("\nSIGINT — closing DB …");
-    if (dataSource?.isInitialized) await dataSource.destroy();
-    process.exit(0);
-  });
-}
-
-run().catch(console.error);
-
-// ────────────────────────────────────────────────────────────────────────────────
-//  Pretty‑print helper (optional)                                                
-// ────────────────────────────────────────────────────────────────────────────────
-function prettyPrintMessage(m: MessageResponse, db: DataSource) {
-  const delivery = m.handle?.service?.toLowerCase() === "sms" ? "SMS" : "iMessage";
-  const direction = m.isFromMe ? "SENT" : "INBOUND";
-  const type = m.associatedMessageType ? "reaction" :
-              m.isAudioMessage        ? "audio"     :
-              (m.attachments?.length) ? "attachments" :
-              (m.balloonBundleId?.includes("Sticker")) ? "sticker" : "text";
-
-  console.log("  ───────────────────────────────────────────");
-  console.log(`[${direction}] (${delivery}) <${type}>  GUID:${m.guid}`);
-  console.log(`  From : ${m.handle?.address ?? "Unknown"}`);
-  console.log(`  Date : ${new Date(m.dateCreated).toLocaleString()}`);
-  if (m.text)     console.log(`  Text : \"${m.text}\"`);
-  if (m.subject)  console.log(`  Subj : \"${m.subject}\"`);
-  if (m.attachments?.length) console.log(`  Attachments: ${m.attachments.length}`);
-  console.log("  ───────────────────────────────────────────\n");
-}
-</file>
-
 <file path="webhook/index.ts">
-import { randomUUID }   from "crypto";
 import { DateTime }     from "luxon";
 import type { MessageResponse, ChatResponse } from "../new/types";
 import { DataSource }   from "typeorm";
@@ -4025,7 +3882,6 @@ export async function buildWebhookPayload(
 
   /* ── core flat structure ── */
   const payload: any = {
-    _id          : randomUUID().replace(/-/g, "").slice(0, 24),
     timestamp    : DateTime.utc().toISO(),   // when we generated the webhook
     alert_type,
     event_type   : alert_type,               // kept for convenience
@@ -4037,7 +3893,6 @@ export async function buildWebhookPayload(
     sender_name  : SENDER_NAME,
     text         : m.text ?? undefined,
     subject      : m.subject ?? undefined,
-    webhook_id   : randomUUID(),
 
     message_type : msgType(m),
 
@@ -4082,19 +3937,228 @@ export async function buildWebhookPayload(
 
   return payload;
 }
+</file>
 
-/* thin wrapper around fetch so caller code stays the same */
-export function postWebhook(
-  body: Record<string, any>,
-  url : string
-): void {
-  fetch(url, {
-    method : "POST",
-    headers: { "Content-Type": "application/json" },
-    body   : JSON.stringify(body)
-  })
-    .then(() => console.log("Webhook posted."))
-    .catch(e => console.error("Webhook post failed:", e.message));
+<file path="index.ts">
+import "reflect-metadata";
+import "dotenv/config";
+
+// ────────────────────────────────────────────────────────────────────────────────
+//  iMessage → webhook poll‑loop (duplicate‑safe, race‑safe)
+// ────────────────────────────────────────────────────────────────────────────────
+import { DataSource, Brackets } from "typeorm";
+
+import { Message } from "./new/entities/Message";
+import { Handle } from "./new/entities/Handle";
+import { Chat } from "./new/entities/Chat";
+import { Attachment } from "./new/entities/Attachment";
+
+import { convertDateTo2001Time } from "./new/helpers/dateUtils";
+import { MessageSerializer } from "./new/serializers/MessageSerializer";
+import {
+  DEFAULT_ATTACHMENT_CONFIG,
+  DEFAULT_MESSAGE_CONFIG
+} from "./new/serializers/constants";
+import { buildWebhookPayload } from "./webhook";
+import type { MessageResponse } from "./new/types";
+import type { DeviceDoc } from "./infrastructure/mongo/registration";
+
+
+// ────────────────────────────────────────────────────────────────────────────────
+//  Webhook
+// ────────────────────────────────────────────────────────────────────────────────
+import { ensureRegistration } from "./infrastructure/mongo/registration";
+import { enqueue } from "./infrastructure/mq/publisher";
+import { createWebhookLog } from "./infrastructure/mongo/webhookLog";
+import { makeWebhookId } from "./infrastructure/id";
+
+const WEBHOOK_URL = process.env.WEBHOOK_URL ?? "";
+
+// ────────────────────────────────────────────────────────────────────────────────
+//  Config
+// ────────────────────────────────────────────────────────────────────────────────
+let deviceConfig: DeviceDoc | null = null;
+
+const DB_PATH = `${process.env.HOME}/Library/Messages/chat.db`;
+let dataSource: DataSource | null = null;
+
+const SCRIPT_MESSAGE_SERIALIZER_CONFIG = {
+  ...DEFAULT_MESSAGE_CONFIG,
+  loadChatParticipants: false,
+  includeChats: true,
+  enforceMaxSize: false,
+  parseAttributedBody: true,
+  parseMessageSummary: true,
+  parsePayloadData: false,
+} as const;
+
+const SCRIPT_ATTACHMENT_SERIALIZER_CONFIG = {
+  ...DEFAULT_ATTACHMENT_CONFIG,
+  loadData: false,
+  loadMetadata: true,
+} as const;
+
+// ────────────────────────────────────────────────────────────────────────────────
+//  DB bootstrap
+// ────────────────────────────────────────────────────────────────────────────────
+async function initializeDatabase(): Promise<boolean> {
+  try {
+    dataSource = new DataSource({
+      name: "iMessageMinimalScript",
+      type: "better-sqlite3",
+      database: DB_PATH,
+      entities: [Message, Handle, Chat, Attachment],
+      // logging: ["query", "error"],
+    });
+    await dataSource.initialize();
+    console.log("Successfully connected to iMessage database.");
+    return true;
+  } catch (err: any) {
+    console.error(`Failed to connect to iMessage database at ${DB_PATH}:`, err.message);
+    console.error("Give the terminal Full‑Disk‑Access and try again.");
+    dataSource = null;
+    return false;
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────────
+//  Query helpers (single source of truth)
+// ────────────────────────────────────────────────────────────────────────────────
+async function getAllMessages(after: Date): Promise<Message[]> {
+  if (!dataSource?.isInitialized) return [];
+
+  const query = dataSource
+    .getRepository(Message)
+    .createQueryBuilder("message")
+    .leftJoinAndSelect("message.handle", "handle")
+    .leftJoinAndSelect("message.attachments", "attachment")
+    .innerJoinAndSelect("message.chats", "chat")
+    .leftJoinAndSelect("chat.participants", "chatParticipants")
+    .andWhere(new Brackets(qb => {
+      qb.where("message.date        > :cut", { cut: convertDateTo2001Time(after) })
+        .orWhere("message.date_edited > :cut", { cut: convertDateTo2001Time(after) });
+    }))
+    .orderBy("message.date", "ASC")
+    .limit(500); // safety cap
+
+  return query.getMany();
+}
+
+// ────────────────────────────────────────────────────────────────────────────────
+//  Poll loop
+// ────────────────────────────────────────────────────────────────────────────────
+async function pollForNewMessages(lastSeen: Date): Promise<Date> {
+  if (!dataSource) return lastSeen;
+
+  //   console.log(`[${new Date().toISOString()}] Checking for new messages since ${lastSeen.toISOString()}`);
+
+  const rows = await getAllMessages(lastSeen);
+
+  if (rows.length) {
+    console.log(`Found ${rows.length} new/updated incoming message(s):`);
+
+    for (const msg of rows) {
+      try {
+        const serial = await MessageSerializer.serialize({
+          message: msg,
+          config: SCRIPT_MESSAGE_SERIALIZER_CONFIG,
+          attachmentConfig: SCRIPT_ATTACHMENT_SERIALIZER_CONFIG,
+          isForNotification: false,
+        });
+
+        // 1. build payload *without* webhook_id
+        const payload = await buildWebhookPayload(serial, dataSource!);
+
+        // 2. derive deterministic ID
+        const webhookId = makeWebhookId(payload.message_id, payload.alert_type);
+        const queuePayload = {
+          webhookId,
+          messageId: payload.message_id,
+          urls: deviceConfig?.webhooks ?? [],
+          payload
+        }
+
+        console.log({ queuePayload: JSON.stringify(queuePayload, null, 2) });
+
+        // 3. persist log entry
+        // … inside the poll loop just after you build queuePayload
+        const wrote = await createWebhookLog(queuePayload.webhookId,
+          payload,
+          queuePayload.urls);
+
+        if (!wrote) {
+          console.log(`↺ duplicate ${queuePayload.webhookId} – skipped enqueue`);
+          continue;                                 // ← next message
+        }
+
+        await enqueue(queuePayload);                // only if fresh
+        console.log("Posted payload to queue.");
+      } catch (e: any) {
+        console.error(`Error serializing ${msg.guid}:`, e.message);
+      }
+    }
+    console.log("  ───────────────────────────────────────────");
+  } else {
+    // console.log("No new messages found.");
+  }
+
+  // advance cursor (exclusive) — pick the newest lastUpdateTime
+  const newest = rows.reduce<Date>(
+    (max, m) => new Date(Math.max(max.getTime(), m.lastUpdateTime.getTime())),
+    lastSeen,
+  );
+  return new Date(newest.getTime() + 1); // +1 ms avoids duplicates
+}
+
+// ────────────────────────────────────────────────────────────────────────────────
+//  Runner
+// ────────────────────────────────────────────────────────────────────────────────
+async function run() {
+  if (!await initializeDatabase()) return;
+  deviceConfig = await ensureRegistration();
+
+  let lastCursor = new Date(Date.now() - 5 * 60_000); // 5‑min backfill
+
+  // race‑safe polling wrapper
+  let inFlight = false;
+  const safePoll = async () => {
+    if (inFlight) return;
+    inFlight = true;
+    lastCursor = await pollForNewMessages(lastCursor);
+    inFlight = false;
+  };
+
+  await safePoll();              // first run immediately
+  setInterval(safePoll, 2_000);  // then every 2 s
+
+  process.on("SIGINT", async () => {
+    console.log("\nSIGINT — closing DB …");
+    if (dataSource?.isInitialized) await dataSource.destroy();
+    process.exit(0);
+  });
+}
+
+run().catch(console.error);
+
+// ────────────────────────────────────────────────────────────────────────────────
+//  Pretty‑print helper (optional)                                                
+// ────────────────────────────────────────────────────────────────────────────────
+function prettyPrintMessage(m: MessageResponse, db: DataSource) {
+  const delivery = m.handle?.service?.toLowerCase() === "sms" ? "SMS" : "iMessage";
+  const direction = m.isFromMe ? "SENT" : "INBOUND";
+  const type = m.associatedMessageType ? "reaction" :
+    m.isAudioMessage ? "audio" :
+      (m.attachments?.length) ? "attachments" :
+        (m.balloonBundleId?.includes("Sticker")) ? "sticker" : "text";
+
+  console.log("  ───────────────────────────────────────────");
+  console.log(`[${direction}] (${delivery}) <${type}>  GUID:${m.guid}`);
+  console.log(`  From : ${m.handle?.address ?? "Unknown"}`);
+  console.log(`  Date : ${new Date(m.dateCreated).toLocaleString()}`);
+  if (m.text) console.log(`  Text : \"${m.text}\"`);
+  if (m.subject) console.log(`  Subj : \"${m.subject}\"`);
+  if (m.attachments?.length) console.log(`  Attachments: ${m.attachments.length}`);
+  console.log("  ───────────────────────────────────────────\n");
 }
 </file>
 

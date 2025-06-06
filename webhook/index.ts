@@ -1,4 +1,3 @@
-import { randomUUID }   from "crypto";
 import { DateTime }     from "luxon";
 import type { MessageResponse, ChatResponse } from "../new/types";
 import { DataSource }   from "typeorm";
@@ -83,7 +82,6 @@ export async function buildWebhookPayload(
 
   /* ── core flat structure ── */
   const payload: any = {
-    _id          : randomUUID().replace(/-/g, "").slice(0, 24),
     timestamp    : DateTime.utc().toISO(),   // when we generated the webhook
     alert_type,
     event_type   : alert_type,               // kept for convenience
@@ -95,7 +93,6 @@ export async function buildWebhookPayload(
     sender_name  : SENDER_NAME,
     text         : m.text ?? undefined,
     subject      : m.subject ?? undefined,
-    webhook_id   : randomUUID(),
 
     message_type : msgType(m),
 
@@ -139,18 +136,4 @@ export async function buildWebhookPayload(
   Object.assign(payload, updInfo(m));
 
   return payload;
-}
-
-/* thin wrapper around fetch so caller code stays the same */
-export function postWebhook(
-  body: Record<string, any>,
-  url : string
-): void {
-  fetch(url, {
-    method : "POST",
-    headers: { "Content-Type": "application/json" },
-    body   : JSON.stringify(body)
-  })
-    .then(() => console.log("Webhook posted."))
-    .catch(e => console.error("Webhook post failed:", e.message));
 }

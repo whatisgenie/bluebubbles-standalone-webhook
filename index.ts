@@ -17,7 +17,7 @@ import {
   DEFAULT_ATTACHMENT_CONFIG,
   DEFAULT_MESSAGE_CONFIG
 } from "./new/serializers/constants";
-import { buildWebhookPayload, postWebhook } from "./webhook";
+import { buildWebhookPayload } from "./webhook";
 import type { MessageResponse } from "./new/types";
 import type { DeviceDoc } from "./infrastructure/mongo/registration";
 
@@ -27,6 +27,8 @@ import type { DeviceDoc } from "./infrastructure/mongo/registration";
 // ────────────────────────────────────────────────────────────────────────────────
 import { ensureRegistration } from "./infrastructure/mongo/registration";
 import { enqueue } from "./infrastructure/mq/publisher";
+import { createWebhookLog } from "./infrastructure/mongo/webhookLog";
+import { makeWebhookId } from "./infrastructure/id";
 
 const WEBHOOK_URL = process.env.WEBHOOK_URL ?? "";
 
@@ -122,10 +124,32 @@ async function pollForNewMessages(lastSeen: Date): Promise<Date> {
           isForNotification: false,
         });
 
+        // 1. build payload *without* webhook_id
         const payload = await buildWebhookPayload(serial, dataSource!);
-        const queuePayload = { payload, urls: deviceConfig?.webhooks ?? [] };
+
+        // 2. derive deterministic ID
+        const webhookId = makeWebhookId(payload.message_id, payload.alert_type);
+        const queuePayload = {
+          webhookId,
+          messageId: payload.message_id,
+          urls: deviceConfig?.webhooks ?? [],
+          payload
+        }
+
         console.log({ queuePayload: JSON.stringify(queuePayload, null, 2) });
-        await enqueue(queuePayload);
+
+        // 3. persist log entry
+        // … inside the poll loop just after you build queuePayload
+        const wrote = await createWebhookLog(queuePayload.webhookId,
+          payload,
+          queuePayload.urls);
+
+        if (!wrote) {
+          console.log(`↺ duplicate ${queuePayload.webhookId} – skipped enqueue`);
+          continue;                                 // ← next message
+        }
+
+        await enqueue(queuePayload);                // only if fresh
         console.log("Posted payload to queue.");
       } catch (e: any) {
         console.error(`Error serializing ${msg.guid}:`, e.message);

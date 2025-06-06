@@ -1,9 +1,12 @@
 import { getChannel } from "./connection";
 
+// infrastructure/mq/publisher.ts
 export type DispatchJob = {
-  payload: any;      // Loop webhook payload
-  urls: string[];    // destination URLs
-};
+    webhookId : string;   // ⬅️ new
+    messageId : string;
+    payload   : any;
+    urls      : string[];
+  };
 
 /** Push one job onto the fan-out exchange. */
 export async function enqueue(job: DispatchJob) {
