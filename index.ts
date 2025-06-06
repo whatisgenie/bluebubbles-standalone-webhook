@@ -132,7 +132,7 @@ async function pollForNewMessages(lastSeen: Date): Promise<Date> {
         const queuePayload = {
           webhookId,
           messageId: payload.message_id,
-          deviceId: deviceConfig?.deviceId,
+          deviceId: deviceConfig!.deviceId!,
           urls: deviceConfig?.webhooks ?? [],
           payload,
 
@@ -142,7 +142,9 @@ async function pollForNewMessages(lastSeen: Date): Promise<Date> {
 
         // 3. persist log entry
         // … inside the poll loop just after you build queuePayload
-        const wrote = await createWebhookLog(queuePayload.webhookId,
+        const wrote = await createWebhookLog(
+          queuePayload.webhookId,
+          queuePayload.deviceId,
           payload,
           queuePayload.urls);
 
