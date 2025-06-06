@@ -23,10 +23,13 @@ import {
  * The filesystem is the directory dedicated to the app-specific files
  */
 export class FileSystem {
+    public static baseDir = path.join(process.env.HOME, "Library/Application Support", "imsg-bot");
 
-/**
- * Asynchronously executes a shell command
- */
+    public static convertDir = path.join(FileSystem.baseDir, "Convert");
+
+    /**
+     * Asynchronously executes a shell command
+     */
     static async execShellCommand(cmd: string): Promise<string> {
         const { exec } = child_process;
         return new Promise((resolve, reject) => {

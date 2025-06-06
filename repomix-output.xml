@@ -40,6 +40,14 @@ The content is organized as follows:
 </file_summary>
 
 <directory_structure>
+infrastructure/
+  mongo/
+    registration.ts
+  mq/
+    publisher.ts
+    worker.ts
+  system/
+    deviceId.ts
 new/
   entities/
     Attachment.ts
@@ -65,6 +73,8 @@ new/
   env.ts
   transformers.ts
   types.ts
+scripts/
+  add-webhook.ts
 webhook/
   index.ts
 .env.example
@@ -80,6 +90,163 @@ types.ts
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="infrastructure/mongo/registration.ts">
+import { getDb } from "./client";
+import { getDeviceId } from "../system/deviceId";
+
+type DeviceDoc = {
+  deviceId: string;
+  webhooks: string[];           // array of URLs
+};
+
+/** Ensure this Mac has a row; return its document. */
+export async function ensureRegistration(): Promise<DeviceDoc> {
+  const db        = await getDb();
+  const deviceId  = getDeviceId();
+  const coll      = db.collection<DeviceDoc>("device_config");
+
+  const update = { $setOnInsert: { webhooks: [] as string[] } };
+  await coll.updateOne({ deviceId }, update, { upsert: true });
+
+  const doc = await coll.findOne({ deviceId });
+  console.log(doc?.webhooks?.length
+    ? `✔︎ loaded ${doc.webhooks.length} webhook(s) for ${deviceId}`
+    : `🆕 registered ${deviceId} (no webhooks yet)`
+  );
+  return doc as DeviceDoc;
+}
+
+/** CLI helper – add a new URL to this Mac’s webhook list. */
+export async function addWebhook(url: string) {
+  const db       = await getDb();
+  const deviceId = getDeviceId();
+  await db.collection<DeviceDoc>("device_config")
+          .updateOne({ deviceId }, { $addToSet: { webhooks: url } });
+  console.log("🔗 webhook added");
+}
+</file>
+
+<file path="infrastructure/mq/publisher.ts">
+import { getChannel } from "./connection";
+
+export type DispatchJob = {
+  payload: any;      // Loop webhook payload
+  urls: string[];    // destination URLs
+};
+
+/** Push one job onto the fan-out exchange. */
+export async function enqueue(job: DispatchJob) {
+  const ch = await getChannel();
+  ch.publish(
+    "webhook.dispatch",
+    "",
+    Buffer.from(JSON.stringify(job)),
+    {
+      persistent: true,
+      headers: { attempts: 0 }     // we track retries in a header
+    }
+  );
+}
+</file>
+
+<file path="infrastructure/mq/worker.ts">
+import fetch from "node-fetch";
+import { getChannel } from "./connection";
+
+(async () => {
+  const ch = await getChannel();
+
+  const MAIN_Q  = "webhook.dispatch.q";
+  const RETRIES = [
+    "webhook.dispatch.retry.1",   // attempt 1  →   5 s delay
+    "webhook.dispatch.retry.2",   // attempt 2  →  10 s delay
+    "webhook.dispatch.retry.3"    // attempt 3  →  20 s delay
+  ];
+
+  ch.consume(MAIN_Q, async msg => {
+    if (!msg) return;              // consumer cancelled
+
+    const attempts = Number(msg.properties.headers?.attempts || 0);
+
+    try {
+      const job = JSON.parse(msg.content.toString()) as {
+        payload: any;
+        urls   : string[];
+      };
+
+      // POST to every endpoint sequentially (simple & safe)
+      for (const url of job.urls) {
+        const res = await fetch(url, {
+          method : "POST",
+          headers: { "Content-Type": "application/json" },
+          body   : JSON.stringify(job.payload)
+        });
+        if (!res.ok) throw new Error(`POST ${url} => ${res.status}`);
+      }
+
+      console.log(`✅ delivered (attempt ${attempts})`);
+      ch.ack(msg);
+
+    } catch (err) {
+      console.error(`❌ attempt ${attempts} failed:`, (err as any).message);
+
+      if (attempts >= 3) {         // abandon after 3 retries
+        ch.ack(msg);
+        return;
+      }
+
+      // re-queue into the next retry queue
+      ch.sendToQueue(
+        RETRIES[attempts],         // 0→retry.1, 1→retry.2, 2→retry.3
+        msg.content,
+        {
+          persistent: true,
+          headers: { attempts: attempts + 1 }
+        }
+      );
+      ch.ack(msg);
+    }
+  });
+
+  console.log("🚚  worker ready – listening for jobs");
+})();
+</file>
+
+<file path="infrastructure/system/deviceId.ts">
+import os from "os";
+import { randomUUID } from "crypto";
+import fs from "fs";
+import path from "path";
+
+/** Stable “username@host-uuid” string, cached on disk. */
+export function getDeviceId(): string {
+  const cache = path.join(
+    process.env.HOME!,
+    "Library/Application Support/imsg-bot/device.id"
+  );
+
+  if (fs.existsSync(cache)) return fs.readFileSync(cache, "utf8").trim();
+
+  const id = `${os.userInfo().username}@${os.hostname()}-${randomUUID()}`;
+  fs.mkdirSync(path.dirname(cache), { recursive: true });
+  fs.writeFileSync(cache, id);
+  return id;
+}
+</file>
+
+<file path="scripts/add-webhook.ts">
+/* Usage:  npx tsx scripts/add-webhook.ts https://hook.site/123 */
+import { addWebhook } from "../infrastructure/mongo/registration";
+
+const url = process.argv[2];
+if (!url) {
+  console.error("Usage: add-webhook.ts <url>");
+  process.exit(1);
+}
+
+addWebhook(url).then(() => process.exit(0));
+</file>
 
 <file path="new/entities/Attachment.ts">
 import { Entity, PrimaryGeneratedColumn, Column, ManyToMany, JoinTable } from "typeorm";
@@ -1046,10 +1213,13 @@ import {
  * The filesystem is the directory dedicated to the app-specific files
  */
 export class FileSystem {
+    public static baseDir = path.join(app.getPath("userData"), subdir);
 
-/**
- * Asynchronously executes a shell command
- */
+    public static convertDir = path.join(FileSystem.baseDir, "Convert");
+
+    /**
+     * Asynchronously executes a shell command
+     */
     static async execShellCommand(cmd: string): Promise<string> {
         const { exec } = child_process;
         return new Promise((resolve, reject) => {
@@ -3553,6 +3723,7 @@ function prettyPrintMessage(m: MessageResponse, db: DataSource) {
 {
   "dependencies": {
     "@firebase/util": "^1.12.0",
+    "amqplib": "^0.10.8",
     "better-sqlite3": "^11.10.0",
     "blurhash": "^2.0.5",
     "byte-base64": "^1.1.0",
@@ -3564,6 +3735,8 @@ function prettyPrintMessage(m: MessageResponse, db: DataSource) {
     "luxon": "^3.6.1",
     "macos-version": "^6.0.0",
     "mime-types": "^3.0.1",
+    "mongodb": "^6.17.0",
+    "node-fetch": "^3.3.2",
     "node-mac-permissions": "^2.5.0",
     "node-typedstream": "^1.4.1",
     "read-chunk": "^5.0.0",
@@ -3576,7 +3749,8 @@ function prettyPrintMessage(m: MessageResponse, db: DataSource) {
   "scripts": {
     "build": "tsc",
     "start": "npx tsx index.ts",
-    "dev": "npx tsx index.ts"
+    "dev": "npx tsx index.ts",
+    "add-webhook": "npx tsx scripts/add-webhook.ts"
   }
 }
 </file>
@@ -3678,7 +3852,7 @@ async function getAllMessages(after: Date): Promise<Message[]> {
 async function pollForNewMessages(lastSeen: Date): Promise<Date> {
   if (!dataSource) return lastSeen;
 
-  console.log(`[${new Date().toISOString()}] Checking for new messages since ${lastSeen.toISOString()}`);
+//   console.log(`[${new Date().toISOString()}] Checking for new messages since ${lastSeen.toISOString()}`);
 
   const rows = await getAllMessages(lastSeen);
 
@@ -3703,7 +3877,7 @@ async function pollForNewMessages(lastSeen: Date): Promise<Date> {
     }
     console.log("  ───────────────────────────────────────────");
   } else {
-    console.log("No new messages found.");
+    // console.log("No new messages found.");
   }
 
   // advance cursor (exclusive) — pick the newest lastUpdateTime
@@ -3766,137 +3940,162 @@ function prettyPrintMessage(m: MessageResponse, db: DataSource) {
 </file>
 
 <file path="webhook/index.ts">
-import { randomUUID } from "crypto";
-import { DateTime } from "luxon";          // bun add luxon
+import { randomUUID }   from "crypto";
+import { DateTime }     from "luxon";
 import type { MessageResponse, ChatResponse } from "../new/types";
-import { DataSource } from "typeorm";
+import { DataSource }   from "typeorm";
 
 /*****************************************************************
- *  buildWebhookPayload  —  returns **flat** Loop webhook payload
+ * buildWebhookPayload — returns one **flat** Loop webhook payload
  *****************************************************************/
 
 const SENDER_NAME = "genie@ai.imsg.bot";
 
 const REACTION_MAP = {
-  love: "love",
-  like: "like",
-  dislike: "dislike",
-  laugh: "laugh",
+  love:      "love",
+  like:      "like",
+  dislike:   "dislike",
+  laugh:     "laugh",
   emphasize: "exclaim",
-  question: "question"
+  question:  "question"
 } as const;
 
-/* ------------------------------------------------------------- */
-/*  helpers                                                      */
-/* ------------------------------------------------------------- */
-function dlvType(svc?: string) {
-  return svc?.toLowerCase() === "sms" ? "sms" : "imessage";
-}
+/* ───────────── helpers ───────────── */
 
-function buildGroup(chat?: ChatResponse) {
-  if (!chat || chat.style !== 43) return undefined; // not a group chat
-  return {
-    group_id: chat.guid,
-    name: chat.displayName ?? "",
-    participants: (chat.participants ?? []).map(p => p.address)
-  };
-}
+const dlvType = (svc?: string) =>
+  svc?.toLowerCase() === "sms" ? "sms" : "imessage";
 
-function buildAttachmentURL(guid: string) {
-  // 🔧 swap for your own CDN / Firebase URL signer
-  return `file:///Attachments/${guid}`;
-}
+const buildGroup = (c?: ChatResponse) =>
+  !c || c.style !== 43
+    ? undefined
+    : {
+        group_id    : c.guid,
+        name        : c.displayName ?? "",
+        participants: (c.participants ?? []).map(p => p.address)
+      };
 
-function detectMessageType(m: MessageResponse): string {
+const buildAttachmentURL = (g: string) =>
+  /* 🔧 swap for your CDN / Firebase signer if you have one */
+  `file:///Attachments/${g}`;
+
+const msgType = (m: MessageResponse): string => {
   if (m.associatedMessageType)      return "reaction";
   if (m.isAudioMessage)             return "audio";
   if (m.attachments?.length)        return "attachments";
   if (m.balloonBundleId?.includes("Sticker")) return "sticker";
   return "text";
-}
+};
 
-/* ============================================================= */
-/*  MAIN                                                          */
-/* ============================================================= */
+/* decide if this message was edited or unsent — “unsent” wins */
+const updInfo = (m: MessageResponse) => {
+  const isUnsent =
+    !!m.dateRetracted ||                       // Sonoma & forward
+    (m.partCount === 0 && !!m.dateEdited);     // Ventura/Monterey fallback
+
+  if (isUnsent) {
+    return {
+      update_event: "unsent" as const,
+      update_at   : DateTime.fromMillis(
+                      (m.dateRetracted ?? m.dateEdited)!
+                    ).toISO()
+    };
+  }
+
+  if (m.dateEdited) {
+    return {
+      update_event: "edited" as const,
+      update_at   : DateTime.fromMillis(m.dateEdited).toISO()
+    };
+  }
+
+  return {};
+};
+
+/* ───────────── main ───────────── */
+
 export async function buildWebhookPayload(
   m : MessageResponse,
-  _db: DataSource               // kept for parity / future look-ups
+  _db: DataSource              // kept for parity / future look-ups
 ): Promise<Record<string, any>> {
-  const alert_type = m.associatedMessageType
-    ? "message_reaction"
-    : (m.isFromMe ? "message_sent" : "message_inbound");
 
-  /* ---------- base flattened payload ------------------------ */
+  const alert_type =
+    m.associatedMessageType
+      ? "message_reaction"
+      : (m.isFromMe ? "message_sent" : "message_inbound");
+
+  /* ── core flat structure ── */
   const payload: any = {
     _id          : randomUUID().replace(/-/g, "").slice(0, 24),
-    timestamp    : DateTime.utc().toISO(),
+    timestamp    : DateTime.utc().toISO(),   // when we generated the webhook
     alert_type,
-    event_type   : alert_type,          // <— still included for convenience
+    event_type   : alert_type,               // kept for convenience
     delivery_type: dlvType(m.handle?.service),
-    language     : { code: "en", name: "English" }, // 🛈 stub; plug real detector
+    language     : { code:"en", name:"English" }, // 🛈 stub – plug detector if needed
 
-    message_id   : m.associatedMessageGuid
-                    ? m.associatedMessageGuid.replace(/^p:\d+\//, "")
-                    : m.guid,
+    message_id   : m.guid,
     recipient    : m.handle?.address ?? "unknown",
     sender_name  : SENDER_NAME,
     text         : m.text ?? undefined,
     subject      : m.subject ?? undefined,
     webhook_id   : randomUUID(),
 
-    message_type : detectMessageType(m),
+    message_type : msgType(m),
 
-    isGroup: false,
-    isReply: false,
+    /* conversation context flags */
+    isGroup      : false,
+    isReply      : false
   };
 
-  /* group chat details */
-  const group = buildGroup(m.chats?.[0]);
-  if (group) {
-    payload.group = group;
+  /* group chat extra block */
+  const grp = buildGroup(m.chats?.[0]);
+  if (grp) {
+    payload.group   = grp;
     payload.isGroup = true;
   }
 
-  /* single-chat guid handy for 1-on-1 threads */
+  /* single-chat guid handy for DMs */
   if (m.chats?.[0]?.guid) payload.chatGuid = m.chats[0].guid;
 
-  /* ---------- reactions -------------------------------------- */
+  /* ── reactions ── */
   if (payload.message_type === "reaction") {
-    const clean = m.associatedMessageType?.replace(/^-/, "") as keyof typeof REACTION_MAP;
+    const clean = m.associatedMessageType!.replace(/^-/, "") as keyof typeof REACTION_MAP;
     payload.reaction       = REACTION_MAP[clean] ?? "unknown";
-    payload.reaction_event = m.associatedMessageType?.startsWith("-") ? "removed" : "placed";
+    payload.reaction_event = m.associatedMessageType!.startsWith("-") ? "removed" : "placed";
     if (m.threadOriginatorGuid) payload.thread_id = m.threadOriginatorGuid;
-    return payload; // early return; nothing else needed
+    return payload;                      // edits / unsends don’t apply to tap-backs
   }
 
-  /* ---------- normal messages -------------------------------- */
+  /* ── normal messages ── */
   if (m.attachments?.length) {
     payload.attachments = m.attachments.map(a => buildAttachmentURL(a.guid));
   }
   if (m.threadOriginatorGuid) {
     payload.thread_id = m.threadOriginatorGuid;
-    payload.isReply = true;
+    payload.isReply   = true;
   }
-  
+
+  /* mark success for outbound messages */
   if (alert_type === "message_sent") payload.success = true;
+
+  /* attach edited / unsent metadata */
+  Object.assign(payload, updInfo(m));
 
   return payload;
 }
 
-
-export function postWebhook(webhookPayload: Record<string, any>, webhookUrl: string): void {
-    fetch(webhookUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(webhookPayload),
-    }).then((response) => {
-      console.log('Webhook posted successfully.');
-    }).catch((error: any) => {
-      console.error(`Error posting webhook: ${error.message}`);
-    });
-  }
+/* thin wrapper around fetch so caller code stays the same */
+export function postWebhook(
+  body: Record<string, any>,
+  url : string
+): void {
+  fetch(url, {
+    method : "POST",
+    headers: { "Content-Type": "application/json" },
+    body   : JSON.stringify(body)
+  })
+    .then(() => console.log("Webhook posted."))
+    .catch(e => console.error("Webhook post failed:", e.message));
+}
 </file>
 
 </files>

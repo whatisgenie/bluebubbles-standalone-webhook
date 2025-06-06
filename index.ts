@@ -6,39 +6,51 @@ import "dotenv/config";
 // ────────────────────────────────────────────────────────────────────────────────
 import { DataSource, Brackets } from "typeorm";
 
-import { Message }     from "./new/entities/Message";
-import { Handle }      from "./new/entities/Handle";
-import { Chat }        from "./new/entities/Chat";
-import { Attachment }  from "./new/entities/Attachment";
+import { Message } from "./new/entities/Message";
+import { Handle } from "./new/entities/Handle";
+import { Chat } from "./new/entities/Chat";
+import { Attachment } from "./new/entities/Attachment";
 
 import { convertDateTo2001Time } from "./new/helpers/dateUtils";
-import { MessageSerializer }     from "./new/serializers/MessageSerializer";
-import { DEFAULT_ATTACHMENT_CONFIG,
-         DEFAULT_MESSAGE_CONFIG  } from "./new/serializers/constants";
-import { buildWebhookPayload, postWebhook }       from "./webhook";
-import type { MessageResponse }   from "./new/types";
+import { MessageSerializer } from "./new/serializers/MessageSerializer";
+import {
+  DEFAULT_ATTACHMENT_CONFIG,
+  DEFAULT_MESSAGE_CONFIG
+} from "./new/serializers/constants";
+import { buildWebhookPayload, postWebhook } from "./webhook";
+import type { MessageResponse } from "./new/types";
+import type { DeviceDoc } from "./infrastructure/mongo/registration";
+
+
+// ────────────────────────────────────────────────────────────────────────────────
+//  Webhook
+// ────────────────────────────────────────────────────────────────────────────────
+import { ensureRegistration } from "./infrastructure/mongo/registration";
+import { enqueue } from "./infrastructure/mq/publisher";
 
 const WEBHOOK_URL = process.env.WEBHOOK_URL ?? "";
 
 // ────────────────────────────────────────────────────────────────────────────────
 //  Config
 // ────────────────────────────────────────────────────────────────────────────────
+let deviceConfig: DeviceDoc | null = null;
+
 const DB_PATH = `${process.env.HOME}/Library/Messages/chat.db`;
-let   dataSource: DataSource | null = null;
+let dataSource: DataSource | null = null;
 
 const SCRIPT_MESSAGE_SERIALIZER_CONFIG = {
   ...DEFAULT_MESSAGE_CONFIG,
   loadChatParticipants: false,
-  includeChats:         true,
-  enforceMaxSize:       false,
-  parseAttributedBody:  true,
-  parseMessageSummary:  true,
-  parsePayloadData:     false,
+  includeChats: true,
+  enforceMaxSize: false,
+  parseAttributedBody: true,
+  parseMessageSummary: true,
+  parsePayloadData: false,
 } as const;
 
 const SCRIPT_ATTACHMENT_SERIALIZER_CONFIG = {
   ...DEFAULT_ATTACHMENT_CONFIG,
-  loadData:     false,
+  loadData: false,
   loadMetadata: true,
 } as const;
 
@@ -48,8 +60,8 @@ const SCRIPT_ATTACHMENT_SERIALIZER_CONFIG = {
 async function initializeDatabase(): Promise<boolean> {
   try {
     dataSource = new DataSource({
-      name:     "iMessageMinimalScript",
-      type:     "better-sqlite3",
+      name: "iMessageMinimalScript",
+      type: "better-sqlite3",
       database: DB_PATH,
       entities: [Message, Handle, Chat, Attachment],
       // logging: ["query", "error"],
@@ -74,10 +86,10 @@ async function getAllMessages(after: Date): Promise<Message[]> {
   const query = dataSource
     .getRepository(Message)
     .createQueryBuilder("message")
-    .leftJoinAndSelect("message.handle",      "handle")
+    .leftJoinAndSelect("message.handle", "handle")
     .leftJoinAndSelect("message.attachments", "attachment")
-    .innerJoinAndSelect("message.chats",      "chat")
-    .leftJoinAndSelect("chat.participants",   "chatParticipants")
+    .innerJoinAndSelect("message.chats", "chat")
+    .leftJoinAndSelect("chat.participants", "chatParticipants")
     .andWhere(new Brackets(qb => {
       qb.where("message.date        > :cut", { cut: convertDateTo2001Time(after) })
         .orWhere("message.date_edited > :cut", { cut: convertDateTo2001Time(after) });
@@ -94,7 +106,7 @@ async function getAllMessages(after: Date): Promise<Message[]> {
 async function pollForNewMessages(lastSeen: Date): Promise<Date> {
   if (!dataSource) return lastSeen;
 
-//   console.log(`[${new Date().toISOString()}] Checking for new messages since ${lastSeen.toISOString()}`);
+  //   console.log(`[${new Date().toISOString()}] Checking for new messages since ${lastSeen.toISOString()}`);
 
   const rows = await getAllMessages(lastSeen);
 
@@ -104,15 +116,16 @@ async function pollForNewMessages(lastSeen: Date): Promise<Date> {
     for (const msg of rows) {
       try {
         const serial = await MessageSerializer.serialize({
-          message:          msg,
-          config:           SCRIPT_MESSAGE_SERIALIZER_CONFIG,
+          message: msg,
+          config: SCRIPT_MESSAGE_SERIALIZER_CONFIG,
           attachmentConfig: SCRIPT_ATTACHMENT_SERIALIZER_CONFIG,
-          isForNotification:false,
+          isForNotification: false,
         });
 
         const payload = await buildWebhookPayload(serial, dataSource!);
-        console.log({ payload: JSON.stringify(payload, null, 2) });
-        postWebhook(payload, WEBHOOK_URL);
+        await enqueue({ payload, urls: deviceConfig.webhooks });
+        // console.log({ payload: JSON.stringify(payload, null, 2) });
+        // postWebhook(payload, WEBHOOK_URL);
       } catch (e: any) {
         console.error(`Error serializing ${msg.guid}:`, e.message);
       }
@@ -135,6 +148,7 @@ async function pollForNewMessages(lastSeen: Date): Promise<Date> {
 // ────────────────────────────────────────────────────────────────────────────────
 async function run() {
   if (!await initializeDatabase()) return;
+  deviceConfig = await ensureRegistration();
 
   let lastCursor = new Date(Date.now() - 5 * 60_000); // 5‑min backfill
 
@@ -144,7 +158,7 @@ async function run() {
     if (inFlight) return;
     inFlight = true;
     lastCursor = await pollForNewMessages(lastCursor);
-    inFlight  = false;
+    inFlight = false;
   };
 
   await safePoll();              // first run immediately
@@ -166,16 +180,16 @@ function prettyPrintMessage(m: MessageResponse, db: DataSource) {
   const delivery = m.handle?.service?.toLowerCase() === "sms" ? "SMS" : "iMessage";
   const direction = m.isFromMe ? "SENT" : "INBOUND";
   const type = m.associatedMessageType ? "reaction" :
-              m.isAudioMessage        ? "audio"     :
-              (m.attachments?.length) ? "attachments" :
-              (m.balloonBundleId?.includes("Sticker")) ? "sticker" : "text";
+    m.isAudioMessage ? "audio" :
+      (m.attachments?.length) ? "attachments" :
+        (m.balloonBundleId?.includes("Sticker")) ? "sticker" : "text";
 
   console.log("  ───────────────────────────────────────────");
   console.log(`[${direction}] (${delivery}) <${type}>  GUID:${m.guid}`);
   console.log(`  From : ${m.handle?.address ?? "Unknown"}`);
   console.log(`  Date : ${new Date(m.dateCreated).toLocaleString()}`);
-  if (m.text)     console.log(`  Text : \"${m.text}\"`);
-  if (m.subject)  console.log(`  Subj : \"${m.subject}\"`);
+  if (m.text) console.log(`  Text : \"${m.text}\"`);
+  if (m.subject) console.log(`  Subj : \"${m.subject}\"`);
   if (m.attachments?.length) console.log(`  Attachments: ${m.attachments.length}`);
   console.log("  ───────────────────────────────────────────\n");
 }
