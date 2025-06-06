@@ -123,9 +123,10 @@ async function pollForNewMessages(lastSeen: Date): Promise<Date> {
         });
 
         const payload = await buildWebhookPayload(serial, dataSource!);
-        await enqueue({ payload, urls: deviceConfig.webhooks });
-        // console.log({ payload: JSON.stringify(payload, null, 2) });
-        // postWebhook(payload, WEBHOOK_URL);
+        const queuePayload = { payload, urls: deviceConfig?.webhooks ?? [] };
+        console.log({ queuePayload: JSON.stringify(queuePayload, null, 2) });
+        await enqueue(queuePayload);
+        console.log("Posted payload to queue.");
       } catch (e: any) {
         console.error(`Error serializing ${msg.guid}:`, e.message);
       }
