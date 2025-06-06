@@ -5,6 +5,7 @@ export type WebhookStatus = "pending" | "delivering" | "success" | "failed" | "d
 export type WebhookLogDoc = {
   webhookId : string;                // payload.webhook_id (UUID)
   messageId : string;                // payload.message_id / msg.guid
+  deviceId  : string;                // payload.deviceId
   urls      : string[];              // fan-out targets
   delivered : number;                // # urls successfully POSTed
   attempts  : number;                // total POST attempts (all urls)
@@ -27,6 +28,7 @@ async function col() {
 // / infrastructure/mongo/webhookLog.ts
 export async function createWebhookLog(
     webhookId : string,
+    deviceId  : string,
     payload   : any,
     urls      : string[]
   ) {
@@ -39,6 +41,7 @@ export async function createWebhookLog(
       await c.insertOne({
         webhookId,
         messageId : payload.message_id ?? "",
+        deviceId,
         urls,
         delivered : 0,
         attempts  : 0,

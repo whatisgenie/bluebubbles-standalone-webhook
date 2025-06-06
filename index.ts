@@ -132,8 +132,10 @@ async function pollForNewMessages(lastSeen: Date): Promise<Date> {
         const queuePayload = {
           webhookId,
           messageId: payload.message_id,
+          deviceId: deviceConfig?.deviceId,
           urls: deviceConfig?.webhooks ?? [],
-          payload
+          payload,
+
         }
 
         console.log({ queuePayload: JSON.stringify(queuePayload, null, 2) });
