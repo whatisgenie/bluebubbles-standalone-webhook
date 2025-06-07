@@ -1,30 +1,63 @@
-import { getDb } from "./client";
-import { getDeviceId } from "../system/deviceId";
+import { getDb }        from "./client";
+import { getDeviceId }  from "../system/deviceId";
+import {
+  getAccountInfo,
+  ICloudFetchError
+} from "../bluebubbles/icloud";
 
+/* ────── Mongo document shape ────── */
 export type DeviceDoc = {
-  deviceId: string;
-  webhooks: string[];           // array of URLs
+  deviceId     : string;
+  webhooks     : string[];
+  aliases      : string[];
+  activeAlias ?: string;
 };
 
-/** Ensure this Mac has a row; return its document. */
+/* ────── ensure row + keep aliases fresh (tolerant) ────── */
 export async function ensureRegistration(): Promise<DeviceDoc> {
-  const db        = await getDb();
-  const deviceId  = getDeviceId();
-  const coll      = db.collection<DeviceDoc>("device_config");
+  const db       = await getDb();
+  const deviceId = getDeviceId();
+  const coll     = db.collection<DeviceDoc>("device_config");
 
+  /* 1. load current document (if any) so we can preserve values on failure */
+  const existing = await coll.findOne({ deviceId });
 
-  const update = { $setOnInsert: { webhooks: [] as string[] } };
-  await coll.updateOne({ deviceId }, update, { upsert: true });
+  /* 2. try to fetch aliases from BlueBubbles */
+  let aliases     = existing?.aliases      ?? [];
+  let activeAlias = existing?.activeAlias  ?? "";
 
-  const doc = await coll.findOne({ deviceId });
-  console.log(doc?.webhooks?.length
+  try {
+    const info = await getAccountInfo();  // may throw
+    aliases     = info.aliases;
+    activeAlias = info.active;
+  } catch (e) {
+    if (e instanceof ICloudFetchError) {
+      console.warn("[registration] BlueBubbles helper not reachable – " +
+                   "using cached aliases");
+    } else {
+      throw e; // unknown error – escalate
+    }
+  }
+
+  /* 3. upsert / refresh document */
+  await coll.updateOne(
+    { deviceId },
+    {
+      $setOnInsert: { webhooks: [] as string[] },
+      $set: { aliases, activeAlias }
+    },
+    { upsert: true }
+  );
+
+  const doc = await coll.findOne({ deviceId }) as DeviceDoc;
+  console.log(doc.webhooks.length
     ? `✔︎ loaded ${doc.webhooks.length} webhook(s) for ${deviceId}`
     : `🆕 registered ${deviceId} (no webhooks yet)`
   );
-  return doc as DeviceDoc;
+  return doc;
 }
 
-/** CLI helper – add a new URL to this Mac’s webhook list. */
+/* ────── CLI helper ────── */
 export async function addWebhook(url: string) {
   const db       = await getDb();
   const deviceId = getDeviceId();

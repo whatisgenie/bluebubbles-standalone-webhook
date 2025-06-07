@@ -92,169 +92,6 @@ types.ts
 <files>
 This section contains the contents of the repository's files.
 
-<file path="infrastructure/mongo/webhookLog.ts">
-import { getDb } from "./client";
-
-export type WebhookStatus = "pending" | "delivering" | "success" | "failed" | "duplicate";
-
-export type WebhookLogDoc = {
-  webhookId : string;                // payload.webhook_id (UUID)
-  messageId : string;                // payload.message_id / msg.guid
-  urls      : string[];              // fan-out targets
-  delivered : number;                // # urls successfully POSTed
-  attempts  : number;                // total POST attempts (all urls)
-  status    : WebhookStatus;
-  payload   : any;                   // full Loop payload – optional but handy
-  lastError?: string;                // most-recent error (if any)
-  createdAt : Date;
-  updatedAt : Date;
-};
-
-/* helper to obtain the collection */
-async function col() {
-  const db  = await getDb();
-  return db.collection<WebhookLogDoc>("webhook_log");
-}
-
-/* ------------------------------------------------------------------ */
-/* producer (index.ts) calls this once – before publishing to Rabbit  */
-/* ------------------------------------------------------------------ */
-// / infrastructure/mongo/webhookLog.ts
-export async function createWebhookLog(
-    webhookId : string,
-    payload   : any,
-    urls      : string[]
-  ) {
-    const c = await col();
-  
-    /* ② ensure a unique index once (no-op if already present) */
-    await c.createIndex({ webhookId: 1 }, { unique: true });
-  
-    try {
-      await c.insertOne({
-        webhookId,
-        messageId : payload.message_id ?? "",
-        urls,
-        delivered : 0,
-        attempts  : 0,
-        status    : "pending",
-        payload,
-        createdAt : new Date(),
-        updatedAt : new Date()
-      });
-  
-      return true;                    // inserted → not a dup
-    } catch (e: any) {
-      if (e.code === 11000) return false;   // duplicate-key
-      throw e;                        // some other DB error
-    }
-  }
-
-/* ------------------------------------------------------------------ */
-/* worker updates                                                     */
-/* ------------------------------------------------------------------ */
-export async function markDuplicate(id: string) {
-  (await col()).updateOne(
-    { webhookId: id },
-    { $set: { status: "duplicate", updatedAt: new Date() } }
-  );
-}
-
-export async function markAttempt(id: string, ok: boolean, err?: string) {
-  (await col()).updateOne(
-    { webhookId: id },
-    {
-      $inc : { attempts: 1, delivered: ok ? 1 : 0 },
-      $set : {
-        status    : ok ? "delivering" : "failed",
-        lastError : err,
-        updatedAt : new Date()
-      }
-    }
-  );
-}
-
-export async function markSuccess(id: string) {
-  (await col()).updateOne(
-    { webhookId: id },
-    { $set: { status: "success", updatedAt: new Date() } }
-  );
-}
-</file>
-
-<file path="infrastructure/id.ts">
-// infrastructure/id.ts
-import { v5 as uuidv5 } from "uuid";
-
-const NAMESPACE = "8d6251b3-e47a-4dbc-b063-4025e3cd69fa"; // random, but fixed
-
-export function makeWebhookId(msgId: string, alertType: string) {
-  return uuidv5(`${msgId}:${alertType}`, NAMESPACE);
-}
-</file>
-
-<file path="infrastructure/mongo/registration.ts">
-import { getDb } from "./client";
-import { getDeviceId } from "../system/deviceId";
-
-export type DeviceDoc = {
-  deviceId: string;
-  webhooks: string[];           // array of URLs
-};
-
-/** Ensure this Mac has a row; return its document. */
-export async function ensureRegistration(): Promise<DeviceDoc> {
-  const db        = await getDb();
-  const deviceId  = getDeviceId();
-  const coll      = db.collection<DeviceDoc>("device_config");
-
-  const update = { $setOnInsert: { webhooks: [] as string[] } };
-  await coll.updateOne({ deviceId }, update, { upsert: true });
-
-  const doc = await coll.findOne({ deviceId });
-  console.log(doc?.webhooks?.length
-    ? `✔︎ loaded ${doc.webhooks.length} webhook(s) for ${deviceId}`
-    : `🆕 registered ${deviceId} (no webhooks yet)`
-  );
-  return doc as DeviceDoc;
-}
-
-/** CLI helper – add a new URL to this Mac’s webhook list. */
-export async function addWebhook(url: string) {
-  const db       = await getDb();
-  const deviceId = getDeviceId();
-  await db.collection<DeviceDoc>("device_config")
-          .updateOne({ deviceId }, { $addToSet: { webhooks: url } });
-  console.log("🔗 webhook added");
-}
-</file>
-
-<file path="infrastructure/mq/publisher.ts">
-import { getChannel } from "./connection";
-
-// infrastructure/mq/publisher.ts
-export type DispatchJob = {
-    webhookId : string;   // ⬅️ new
-    messageId : string;
-    payload   : any;
-    urls      : string[];
-  };
-
-/** Push one job onto the fan-out exchange. */
-export async function enqueue(job: DispatchJob) {
-  const ch = await getChannel();
-  ch.publish(
-    "webhook.dispatch",
-    "",
-    Buffer.from(JSON.stringify(job)),
-    {
-      persistent: true,
-      headers: { attempts: 0 }     // we track retries in a header
-    }
-  );
-}
-</file>
-
 <file path="infrastructure/system/deviceId.ts">
 import os from "os";
 import { randomUUID } from "crypto";
@@ -274,6 +111,17 @@ export function getDeviceId(): string {
   fs.mkdirSync(path.dirname(cache), { recursive: true });
   fs.writeFileSync(cache, id);
   return id;
+}
+</file>
+
+<file path="infrastructure/id.ts">
+// infrastructure/id.ts
+import { v5 as uuidv5 } from "uuid";
+
+const NAMESPACE = "8d6251b3-e47a-4dbc-b063-4025e3cd69fa"; // random, but fixed
+
+export function makeWebhookId(msgId: string, alertType: string) {
+  return uuidv5(`${msgId}:${alertType}`, NAMESPACE);
 }
 </file>
 
@@ -2543,6 +2391,69 @@ export enum ProgressStatus {
 }
 </file>
 
+<file path="infrastructure/mongo/registration.ts">
+import { getDb } from "./client";
+import { getDeviceId } from "../system/deviceId";
+
+export type DeviceDoc = {
+  deviceId: string;
+  webhooks: string[];           // array of URLs
+};
+
+/** Ensure this Mac has a row; return its document. */
+export async function ensureRegistration(): Promise<DeviceDoc> {
+  const db        = await getDb();
+  const deviceId  = getDeviceId();
+  const coll      = db.collection<DeviceDoc>("device_config");
+
+
+  const update = { $setOnInsert: { webhooks: [] as string[] } };
+  await coll.updateOne({ deviceId }, update, { upsert: true });
+
+  const doc = await coll.findOne({ deviceId });
+  console.log(doc?.webhooks?.length
+    ? `✔︎ loaded ${doc.webhooks.length} webhook(s) for ${deviceId}`
+    : `🆕 registered ${deviceId} (no webhooks yet)`
+  );
+  return doc as DeviceDoc;
+}
+
+/** CLI helper – add a new URL to this Mac’s webhook list. */
+export async function addWebhook(url: string) {
+  const db       = await getDb();
+  const deviceId = getDeviceId();
+  await db.collection<DeviceDoc>("device_config")
+          .updateOne({ deviceId }, { $addToSet: { webhooks: url } });
+  console.log("🔗 webhook added");
+}
+</file>
+
+<file path="infrastructure/mq/publisher.ts">
+import { getChannel } from "./connection";
+
+// infrastructure/mq/publisher.ts
+export type DispatchJob = {
+    webhookId : string;   // ⬅️ new
+    messageId : string;
+    payload   : any;
+    urls      : string[];
+  };
+
+/** Push one job onto the fan-out exchange. */
+export async function enqueue(job: DispatchJob) {
+  const ch = await getChannel();
+  ch.publish(
+    "webhook.dispatch",
+    "",
+    Buffer.from(JSON.stringify(job)),
+    {
+      persistent: true,
+      headers: { attempts: 0 }     // we track retries in a header
+    }
+  );
+}
+</file>
+
 <file path="new/fileSystem/index.ts">
 import * as path from "path";
 import * as child_process from "child_process";
@@ -3761,6 +3672,99 @@ function prettyPrintMessage(m: MessageResponse, db: DataSource) {
 }
 </file>
 
+<file path="infrastructure/mongo/webhookLog.ts">
+import { getDb } from "./client";
+
+export type WebhookStatus = "pending" | "delivering" | "success" | "failed" | "duplicate";
+
+export type WebhookLogDoc = {
+  webhookId : string;                // payload.webhook_id (UUID)
+  messageId : string;                // payload.message_id / msg.guid
+  deviceId  : string;                // payload.deviceId
+  urls      : string[];              // fan-out targets
+  delivered : number;                // # urls successfully POSTed
+  attempts  : number;                // total POST attempts (all urls)
+  status    : WebhookStatus;
+  payload   : any;                   // full Loop payload – optional but handy
+  lastError?: string;                // most-recent error (if any)
+  createdAt : Date;
+  updatedAt : Date;
+};
+
+/* helper to obtain the collection */
+async function col() {
+  const db  = await getDb();
+  return db.collection<WebhookLogDoc>("webhook_log");
+}
+
+/* ------------------------------------------------------------------ */
+/* producer (index.ts) calls this once – before publishing to Rabbit  */
+/* ------------------------------------------------------------------ */
+// / infrastructure/mongo/webhookLog.ts
+export async function createWebhookLog(
+    webhookId : string,
+    deviceId  : string,
+    payload   : any,
+    urls      : string[]
+  ) {
+    const c = await col();
+  
+    /* ② ensure a unique index once (no-op if already present) */
+    await c.createIndex({ webhookId: 1 }, { unique: true });
+    await c.createIndex({ status: 1, updatedAt: -1 });   
+  
+    try {
+      await c.insertOne({
+          webhookId,
+          messageId : payload.message_id ?? "",
+          deviceId,
+          urls,
+          delivered : 0,
+          attempts  : 0,
+          status    : "pending",
+          payload,
+          createdAt : new Date(),
+          updatedAt : new Date()
+        });
+        return true;            // row was written
+      } catch (e: any) {
+        if (e.code === 11000) return false;   // duplicate key → somebody beat us to it
+        throw e;                              // other errors bubble up
+      }
+  }
+
+/* ------------------------------------------------------------------ */
+/* worker updates                                                     */
+/* ------------------------------------------------------------------ */
+export async function markDuplicate(id: string) {
+  (await col()).updateOne(
+    { webhookId: id },
+    { $set: { status: "duplicate", updatedAt: new Date() } }
+  );
+}
+
+export async function markAttempt(id: string, ok: boolean, err?: string) {
+  (await col()).updateOne(
+    { webhookId: id },
+    {
+      $inc : { attempts: 1, delivered: ok ? 1 : 0 },
+      $set : {
+        status    : ok ? "delivering" : "failed",
+        lastError : err,
+        updatedAt : new Date()
+      }
+    }
+  );
+}
+
+export async function markSuccess(id: string) {
+  (await col()).updateOne(
+    { webhookId: id },
+    { $set: { status: "success", updatedAt: new Date() } }
+  );
+}
+</file>
+
 <file path="package.json">
 {
   "dependencies": {
@@ -4074,15 +4078,19 @@ async function pollForNewMessages(lastSeen: Date): Promise<Date> {
         const queuePayload = {
           webhookId,
           messageId: payload.message_id,
+          deviceId: deviceConfig!.deviceId!,
           urls: deviceConfig?.webhooks ?? [],
-          payload
+          payload,
+
         }
 
         console.log({ queuePayload: JSON.stringify(queuePayload, null, 2) });
 
         // 3. persist log entry
         // … inside the poll loop just after you build queuePayload
-        const wrote = await createWebhookLog(queuePayload.webhookId,
+        const wrote = await createWebhookLog(
+          queuePayload.webhookId,
+          queuePayload.deviceId,
           payload,
           queuePayload.urls);
 
@@ -4092,7 +4100,7 @@ async function pollForNewMessages(lastSeen: Date): Promise<Date> {
         }
 
         await enqueue(queuePayload);                // only if fresh
-        console.log("Posted payload to queue.");
+        console.log("Queued payload → RabbitMQ");
       } catch (e: any) {
         console.error(`Error serializing ${msg.guid}:`, e.message);
       }
