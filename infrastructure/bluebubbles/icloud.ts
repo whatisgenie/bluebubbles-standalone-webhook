@@ -17,7 +17,7 @@ export class ICloudFetchError extends Error {
 
 const ENDPOINT =
   process.env.ICLOUD_ENDPOINT ??
-  "http://127.0.0.1:12345/bb/api/v1/icloud/account";
+  "http://127.0.0.1:1234/api/v1/icloud/account?password=geniegenie";
 
 export async function getAccountInfo(
   retries = 3,
