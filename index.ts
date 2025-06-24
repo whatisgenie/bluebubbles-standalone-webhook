@@ -30,8 +30,6 @@ import { enqueue } from "./infrastructure/mq/publisher";
 import { createWebhookLog } from "./infrastructure/mongo/webhookLog";
 import { makeWebhookId } from "./infrastructure/id";
 
-const WEBHOOK_URL = process.env.WEBHOOK_URL ?? "";
-
 // ────────────────────────────────────────────────────────────────────────────────
 //  Config
 // ────────────────────────────────────────────────────────────────────────────────
