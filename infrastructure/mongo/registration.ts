@@ -49,11 +49,6 @@ export async function ensureRegistration(): Promise<DeviceDoc> {
 
   try {
     const serverResponse = await getServerMeta();  // may throw
-    // If we got server info, it might have better/newer aliases
-    if (serverResponse.accountInfo.aliases.length > 0) {
-      aliases = serverResponse.accountInfo.aliases;
-      activeAlias = serverResponse.accountInfo.active;
-    }
     // Store the full server metadata
     serverMeta = {
       lastUpdated: new Date(),
