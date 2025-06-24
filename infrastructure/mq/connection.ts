@@ -8,7 +8,7 @@ export async function getChannel(): Promise<Channel> {
   if (chan) return chan;
 
   conn = await amqplib.connect(
-    process.env.AMQP_URL ?? "amqp://qW2TZQMsmUTo3Ntn:IO0m2XEI8AVnQq6n3_GRgId0WgLQB3Nt@tramway.proxy.rlwy.net:10714"
+    process.env.RABBIT_URL ?? "amqp://qW2TZQMsmUTo3Ntn:IO0m2XEI8AVnQq6n3_GRgId0WgLQB3Nt@tramway.proxy.rlwy.net:10714"
   );
   chan = await conn.createChannel();
 
