@@ -9,6 +9,15 @@ import {
   ServerMetaFetchError
 } from "../bluebubbles/serverMeta";
 
+
+const PASSWORD = "geniegenie";
+
+export interface Instance {
+  sender_number: string;          // +1626…
+  api          : string;          // http://my-bb:1234
+  password?    : string;          // (optional) per-instance BB password
+}
+
 /* ────── Mongo document shape ────── */
 export type DeviceDoc = {
   deviceId     : string;
@@ -16,6 +25,10 @@ export type DeviceDoc = {
   aliases      : string[];
   activeAlias ?: string;
   serverMeta  ?: any; // Store raw server metadata
+  // Instance fields flattened to root
+  sender_number: string;
+  api          : string;
+  password     : string;
 };
 
 /* ────── ensure row + keep aliases fresh (tolerant) ────── */
@@ -63,7 +76,18 @@ export async function ensureRegistration(): Promise<DeviceDoc> {
     }
   }
 
-  /* 4. remove conflicting aliases from other devices */
+  /* 4. derive Instance fields */
+  // Find phone number alias (starts with +)
+  const sender_number = aliases.find((alias: string) => alias.startsWith('+')) || aliases[0] || "";
+  
+  // Construct API URL from first local IPv4
+  const firstIpv4 = serverMeta?.local_ipv4s?.[0];
+  const api = firstIpv4 ? `http://${firstIpv4}:1234` : "";
+  
+  // Hardcoded password
+  const password = PASSWORD;
+
+  /* 5. remove conflicting aliases from other devices */
   if (aliases.length > 0 || activeAlias) {
     // Remove these aliases from all other devices
     await coll.updateMany(
@@ -87,12 +111,19 @@ export async function ensureRegistration(): Promise<DeviceDoc> {
     }
   }
 
-  /* 5. upsert / refresh document */
+  /* 6. upsert / refresh document */
   await coll.updateOne(
     { deviceId },
     {
       $setOnInsert: { webhooks: [] as string[] },
-      $set: { aliases, activeAlias, serverMeta }
+      $set: { 
+        aliases, 
+        activeAlias, 
+        serverMeta,
+        sender_number,
+        api,
+        password
+      }
     },
     { upsert: true }
   );
