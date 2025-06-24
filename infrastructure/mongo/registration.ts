@@ -39,7 +39,31 @@ export async function ensureRegistration(): Promise<DeviceDoc> {
     }
   }
 
-  /* 3. upsert / refresh document */
+  /* 3. remove conflicting aliases from other devices */
+  if (aliases.length > 0 || activeAlias) {
+    // Remove these aliases from all other devices
+    await coll.updateMany(
+      { deviceId: { $ne: deviceId } },
+      { 
+        $pull: { aliases: { $in: aliases } }
+      }
+    );
+
+    // Additional cleanup: if activeAlias matches any other device's activeAlias, clear it
+    if (activeAlias) {
+      await coll.updateMany(
+        { 
+          deviceId: { $ne: deviceId },
+          activeAlias: activeAlias
+        },
+        { 
+          $unset: { activeAlias: "" }
+        }
+      );
+    }
+  }
+
+  /* 4. upsert / refresh document for current device */
   await coll.updateOne(
     { deviceId },
     {
