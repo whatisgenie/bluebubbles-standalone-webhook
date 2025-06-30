@@ -41,6 +41,9 @@ The content is organized as follows:
 
 <directory_structure>
 infrastructure/
+  bluebubbles/
+    icloud.ts
+    serverMeta.ts
   mongo/
     registration.ts
     webhookLog.ts
@@ -91,6 +94,82 @@ types.ts
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="infrastructure/bluebubbles/serverMeta.ts">
+/**
+ * BlueBubbles server → server info fetcher
+ *
+ * - Retries 3× with 1-second back-off.
+ * - Throws `ServerMetaFetchError` on final failure so callers can detect it.
+ */
+import fetch, { Response } from "node-fetch";
+
+export type AccountInfo = {
+  active  : string;   // current "start new conv." alias
+  aliases : string[]; // every vetted phone / email alias
+};
+
+export type ServerMetaResponse = {
+  accountInfo: AccountInfo;
+  serverData: any; // Raw server metadata
+};
+
+export class ServerMetaFetchError extends Error {
+  constructor(message: string) { super(message); }
+}
+
+const ENDPOINT =
+  process.env.SERVER_INFO_ENDPOINT ??
+  "http://localhost:1234/api/v1/server/info?password=geniegenie";
+
+export async function getServerMeta(
+  retries = 3,
+  delayMs = 1_000
+): Promise<ServerMetaResponse> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(ENDPOINT, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(3_000)  // network stall safety
+      }).then((r: Response) => r.json()) as any;
+
+      if (res.status !== 200)
+        throw new Error(res.message ?? "BlueBubbles server returned error");
+
+      // Extract detected aliases from server info
+      const detectedIcloud = res.data.detected_icloud;
+      const detectedImessage = res.data.detected_imessage;
+
+      // Create unique aliases array
+      const aliasesSet = new Set<string>();
+      if (detectedIcloud) aliasesSet.add(detectedIcloud);
+      if (detectedImessage) aliasesSet.add(detectedImessage);
+      
+      const aliases = Array.from(aliasesSet);
+      const active = detectedIcloud || detectedImessage || "";
+
+      return {
+        accountInfo: {
+          active,
+          aliases
+        },
+        serverData: res.data  // Store the full server response data
+      };
+    }
+    catch (err) {
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, delayMs));
+        continue;                        // retry
+      }
+      throw new ServerMetaFetchError(
+        `Failed to reach BlueBubbles server (${(err as Error).message})`
+      );
+    }
+  }
+  /* never reached, but TypeScript likes it */
+  throw new ServerMetaFetchError("Unknown server info fetch failure");
+}
+</file>
 
 <file path="infrastructure/system/deviceId.ts">
 import os from "os";
@@ -1981,10 +2060,6 @@ if (!url) {
 addWebhook(url).then(() => process.exit(0));
 </file>
 
-<file path=".env.example">
-WEBHOOK_URL="<YOUR_WEBHOOK_URL>"
-</file>
-
 <file path=".gitignore">
 # Based on https://raw.githubusercontent.com/github/gitignore/main/Node.gitignore
 
@@ -2391,40 +2466,59 @@ export enum ProgressStatus {
 }
 </file>
 
-<file path="infrastructure/mongo/registration.ts">
-import { getDb } from "./client";
-import { getDeviceId } from "../system/deviceId";
+<file path="infrastructure/bluebubbles/icloud.ts">
+/**
+ * BlueBubbles-helper → vetted aliases fetcher
+ *
+ * - Retries 3× with 1-second back-off.
+ * - Throws `ICloudFetchError` on final failure so callers can detect it.
+ */
+import fetch from "node-fetch";
 
-export type DeviceDoc = {
-  deviceId: string;
-  webhooks: string[];           // array of URLs
+export type AccountInfo = {
+  active  : string;   // current “start new conv.” alias
+  aliases : string[]; // every vetted phone / email alias
 };
 
-/** Ensure this Mac has a row; return its document. */
-export async function ensureRegistration(): Promise<DeviceDoc> {
-  const db        = await getDb();
-  const deviceId  = getDeviceId();
-  const coll      = db.collection<DeviceDoc>("device_config");
-
-
-  const update = { $setOnInsert: { webhooks: [] as string[] } };
-  await coll.updateOne({ deviceId }, update, { upsert: true });
-
-  const doc = await coll.findOne({ deviceId });
-  console.log(doc?.webhooks?.length
-    ? `✔︎ loaded ${doc.webhooks.length} webhook(s) for ${deviceId}`
-    : `🆕 registered ${deviceId} (no webhooks yet)`
-  );
-  return doc as DeviceDoc;
+export class ICloudFetchError extends Error {
+  constructor(message: string) { super(message); }
 }
 
-/** CLI helper – add a new URL to this Mac’s webhook list. */
-export async function addWebhook(url: string) {
-  const db       = await getDb();
-  const deviceId = getDeviceId();
-  await db.collection<DeviceDoc>("device_config")
-          .updateOne({ deviceId }, { $addToSet: { webhooks: url } });
-  console.log("🔗 webhook added");
+const ENDPOINT =
+  process.env.ICLOUD_ENDPOINT ??
+  "http://127.0.0.1:1234/api/v1/icloud/account?password=geniegenie";
+
+export async function getAccountInfo(
+  retries = 3,
+  delayMs = 1_000
+): Promise<AccountInfo> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(ENDPOINT, {
+        headers: { Accept: "application/json" },
+        timeout: 3_000                   // network stall safety
+      }).then(r => r.json());
+
+      if (res.status !== 200)
+        throw new Error(res.message ?? "BlueBubbles helper returned error");
+
+      return {
+        active : res.data.active_alias,
+        aliases: res.data.vetted_aliases.map((a: any) => a.Alias)
+      };
+    }
+    catch (err) {
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, delayMs));
+        continue;                        // retry
+      }
+      throw new ICloudFetchError(
+        `Failed to reach BlueBubbles helper (${(err as Error).message})`
+      );
+    }
+  }
+  /* never reached, but TypeScript likes it */
+  throw new ICloudFetchError("Unknown alias fetch failure");
 }
 </file>
 
@@ -3348,6 +3442,10 @@ export class MessageSerializer {
 }
 </file>
 
+<file path=".env.example">
+MONGO_URI="<>"
+</file>
+
 <file path="index2.ts">
 import "reflect-metadata";
 
@@ -3801,6 +3899,155 @@ export async function markSuccess(id: string) {
 }
 </file>
 
+<file path="infrastructure/mongo/registration.ts">
+import { getDb }        from "./client";
+import { getDeviceId }  from "../system/deviceId";
+import {
+  getAccountInfo,
+  ICloudFetchError
+} from "../bluebubbles/icloud";
+import {  
+  getServerMeta,
+  ServerMetaFetchError
+} from "../bluebubbles/serverMeta";
+
+
+const PASSWORD = "geniegenie";
+
+export interface Instance {
+  sender_number: string;          // +1626…
+  api          : string;          // http://my-bb:1234
+  password?    : string;          // (optional) per-instance BB password
+}
+
+/* ────── Mongo document shape ────── */
+export type DeviceDoc = {
+  deviceId     : string;
+  webhooks     : string[];
+  aliases      : string[];
+  activeAlias ?: string;
+  serverMeta  ?: any; // Store raw server metadata
+  // Instance fields flattened to root
+  sender_number: string;
+  api          : string;
+  password     : string;
+};
+
+/* ────── ensure row + keep aliases fresh (tolerant) ────── */
+export async function ensureRegistration(): Promise<DeviceDoc> {
+  const db       = await getDb();
+  const deviceId = getDeviceId();
+  const coll     = db.collection<DeviceDoc>("device_config");
+
+  /* 1. load current document (if any) so we can preserve values on failure */
+  const existing = await coll.findOne({ deviceId });
+
+  /* 2. try to fetch aliases from BlueBubbles iCloud helper */
+  let aliases     = existing?.aliases      ?? [];
+  let activeAlias = existing?.activeAlias  ?? "";
+
+  try {
+    const info = await getAccountInfo();  // may throw
+    aliases     = info.aliases;
+    activeAlias = info.active;
+  } catch (e) {
+    if (e instanceof ICloudFetchError) {
+      console.warn("[registration] BlueBubbles helper not reachable – " +
+                   "using cached aliases");
+    } else {
+      throw e; // unknown error – escalate
+    }
+  }
+
+  /* 3. try to fetch server metadata */
+  let serverMeta = existing?.serverMeta ?? null;
+
+  try {
+    const serverResponse = await getServerMeta();  // may throw
+    // Store the full server metadata
+    serverMeta = {
+      lastUpdated: new Date(),
+      ...serverResponse.serverData
+    };
+  } catch (e) {
+    if (e instanceof ServerMetaFetchError) {
+      console.warn("[registration] BlueBubbles server not reachable – " +
+                   "using cached server meta");
+    } else {
+      throw e; // unknown error – escalate
+    }
+  }
+
+  /* 4. derive Instance fields */
+  // Find phone number alias (starts with +)
+  const sender_number = aliases.find((alias: string) => alias.startsWith('+')) || aliases[0] || "";
+  
+  // Construct API URL from first local IPv4
+  const firstIpv4 = serverMeta?.local_ipv4s?.[0];
+  const api = firstIpv4 ? `http://${firstIpv4}:1234` : "";
+  
+  // Hardcoded password
+  const password = PASSWORD;
+
+  /* 5. remove conflicting aliases from other devices */
+  if (aliases.length > 0 || activeAlias) {
+    // Remove these aliases from all other devices
+    await coll.updateMany(
+      { deviceId: { $ne: deviceId } },
+      { 
+        $pull: { aliases: { $in: aliases } }
+      }
+    );
+
+    // Additional cleanup: if activeAlias matches any other device's activeAlias, clear it
+    if (activeAlias) {
+      await coll.updateMany(
+        { 
+          deviceId: { $ne: deviceId },
+          activeAlias: activeAlias
+        },
+        { 
+          $unset: { activeAlias: "" }
+        }
+      );
+    }
+  }
+
+  /* 6. upsert / refresh document */
+  await coll.updateOne(
+    { deviceId },
+    {
+      $setOnInsert: { webhooks: [] as string[] },
+      $set: { 
+        aliases, 
+        activeAlias, 
+        serverMeta,
+        sender_number,
+        api,
+        password
+      }
+    },
+    { upsert: true }
+  );
+
+  const doc = await coll.findOne({ deviceId }) as DeviceDoc;
+  console.log(doc.webhooks.length
+    ? `✔︎ loaded ${doc.webhooks.length} webhook(s) for ${deviceId}`
+    : `🆕 registered ${deviceId} (no webhooks yet)`
+  );
+  return doc;
+}
+
+/* ────── CLI helper ────── */
+export async function addWebhook(url: string) {
+  const db       = await getDb();
+  const deviceId = getDeviceId();
+  await db.collection<DeviceDoc>("device_config")
+          .updateOne({ deviceId }, { $addToSet: { webhooks: url } });
+  console.log("🔗 webhook added");
+}
+</file>
+
 <file path="webhook/index.ts">
 import { DateTime }     from "luxon";
 import type { MessageResponse, ChatResponse } from "../new/types";
@@ -3976,8 +4223,6 @@ import { enqueue } from "./infrastructure/mq/publisher";
 import { createWebhookLog } from "./infrastructure/mongo/webhookLog";
 import { makeWebhookId } from "./infrastructure/id";
 
-const WEBHOOK_URL = process.env.WEBHOOK_URL ?? "";
-
 // ────────────────────────────────────────────────────────────────────────────────
 //  Config
 // ────────────────────────────────────────────────────────────────────────────────
@@ -4081,7 +4326,6 @@ async function pollForNewMessages(lastSeen: Date): Promise<Date> {
           deviceId: deviceConfig!.deviceId!,
           urls: deviceConfig?.webhooks ?? [],
           payload,
-
         }
 
         console.log({ queuePayload: JSON.stringify(queuePayload, null, 2) });
